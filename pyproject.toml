@@ -1,0 +1,51 @@
+[project]
+name = "flagsmith-sql-flag-engine"
+version = "0.1.0"
+description = "SQL translator for Flagsmith segment predicates. Sibling to flagsmith-flag-engine (Python) and flagsmith-rust-flag-engine (Rust); produces SQL strings instead of evaluating directly."
+readme = "README.md"
+authors = [{ name = "Flagsmith", email = "engineering@flagsmith.com" }]
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: SQL",
+    "Topic :: Database",
+]
+dependencies = [
+    "flagsmith-flag-engine>=10",
+]
+
+[project.urls]
+Homepage = "https://github.com/Flagsmith/flagsmith-sql-flag-engine"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "snowflake-snowpark-python>=1.20",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.14,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "parity: tests that hit Snowflake (skipped if SNOWFLAKE_* env vars are unset)",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+files = ["src/flagsmith_sql_flag_engine"]
