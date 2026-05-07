@@ -8,14 +8,15 @@ in the translator's SQL generation, not engine equivalence.
 
 from __future__ import annotations
 
-from flag_engine.context.types import EnvironmentContext
+from flag_engine.context.types import EvaluationContext
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
+from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
 
 
 def _ctx(env_key: str = "test-env-key", env_name: str = "Test") -> TranslateContext:
-    env: EnvironmentContext = {"key": env_key, "name": env_name}
-    return TranslateContext(environment=env)
+    eval_ctx: EvaluationContext = {"environment": {"key": env_key, "name": env_name}}
+    return TranslateContext(evaluation_context=eval_ctx, dialect=SnowflakeDialect())
 
 
 def test_translate_segment__equal_on_string_trait__emits_variant_path() -> None:

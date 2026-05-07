@@ -5,10 +5,6 @@ is dialect-agnostic. The dialect-specific bits are the small SQL fragments that
 differ across engines: how to compute MD5 → hex digest, how to parse 8 hex
 chars to a 32-bit integer, what the syntax for prefix-anchored regex match is,
 and so on.
-
-Today only `SnowflakeDialect` exists. Adding e.g. DuckDB would mean writing one
-class that implements this protocol with the appropriate SQL fragments. The
-translator code does not change.
 """
 
 from __future__ import annotations
@@ -27,15 +23,24 @@ class Dialect(Protocol):
 
     name: str  # human-readable, used in test ids and error messages
 
-    # --- trait access ---
+    # --- IDENTITIES schema access ---
+    #
+    # The dialect owns the canonical IDENTITIES schema (see `schema_ddl`),
+    # so it also owns the SQL expression for each logical column. The
+    # translator just hands over an alias.
 
-    def trait_path(self, traits_col: str, trait_key: str) -> str:
+    def identifier_expr(self, alias: str) -> str:
+        """SQL expression for `$.identity.identifier`."""
+        ...
+
+    def identity_key_expr(self, alias: str) -> str:
+        """SQL expression for `$.identity.key`."""
+        ...
+
+    def trait_path(self, alias: str, trait_key: str) -> str:
         """Path-extract a trait value from the IDENTITIES traits container.
 
-        The shape of `traits_col` and the path syntax both vary by SQL
-        engine: Snowflake stores traits as a single VARIANT and uses
-        `i.traits:"key"`; future Postgres dialects might use JSONB
-        (`i.traits ->> 'key'`) or a separate long-form table joined back.
+        The path syntax varies by SQL engine.
         """
         ...
 
@@ -80,7 +85,7 @@ class Dialect(Protocol):
     # --- type casts ---
 
     def cast_string(self, expr: str) -> str:
-        """Cast `expr` to a Snowflake-style STRING / VARCHAR."""
+        """Cast `expr` to STRING / VARCHAR."""
         ...
 
     def cast_float(self, expr: str) -> str:

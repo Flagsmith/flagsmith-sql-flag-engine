@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from flag_engine.context.types import EnvironmentContext
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
+from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
@@ -176,11 +176,11 @@ def parity_results(
     select_clauses: list[str] = []
     for case_idx, case in enumerate(loaded_cases):
         eval_ctx = case["context"]
-        env: EnvironmentContext = eval_ctx["environment"]
+        env_key = eval_ctx["environment"]["key"]
         for seg_key, segment in (eval_ctx.get("segments") or {}).items():
-            tr_ctx = TranslateContext(environment=env)
+            tr_ctx = TranslateContext(evaluation_context=eval_ctx, dialect=SnowflakeDialect())
             sql = translate_segment(segment, tr_ctx)
-            pairs.append((case_idx, seg_key, sql, env["key"]))
+            pairs.append((case_idx, seg_key, sql, env_key))
 
     for i, (_case_idx, _seg_key, sql, env_key) in enumerate(pairs):
         if sql is None:

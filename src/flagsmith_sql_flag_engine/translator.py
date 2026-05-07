@@ -29,15 +29,15 @@ from __future__ import annotations
 
 import re
 
+import jsonpath_rfc9535
 from flag_engine.context.types import (
-    EnvironmentContext,
+    EvaluationContext,
     SegmentCondition,
     SegmentContext,
     SegmentRule,
 )
 
 from flagsmith_sql_flag_engine.dialect import Dialect
-from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
 from flagsmith_sql_flag_engine.utils import (
     escape_string,
     modulo_literal,
@@ -93,67 +93,72 @@ _HASH_CONST_LOW = 6835  # 16^8 mod 9999
 class TranslateContext:
     """Inputs the translator needs to produce a query for a specific shape.
 
-    `environment`     — flag_engine `EnvironmentContext` TypedDict
-                        (`{"key": str, "name": str}`). `key` is used as
-                        `environment_id` in the `IDENTITIES` table; `name`
-                        is referenced by `$.environment.name` JSONPath
-                        properties.
-    `dialect`         — implementation of the `Dialect` protocol.
+    `evaluation_context` — flag_engine `EvaluationContext` TypedDict. The
+                        `identity` key is `NotRequired`; this layer only
+                        depends on the non-identity portion (environment,
+                        feature, etc.) since identity values come from
+                        each `IDENTITIES` row at SQL execution time.
+    `dialect`         — required implementation of the `Dialect` protocol.
+                        The dialect owns the IDENTITIES schema, so column
+                        references are derived via dialect methods rather
+                        than configured here.
     `identities_alias` — table alias for `IDENTITIES` in the surrounding
                         query (default `i`).
-    `identifier_col`  — column on the alias for `$.identity.identifier`.
-    `identity_key_col` — column on the alias for `$.identity.key`.
-    `traits_col`      — VARIANT column holding the identity's trait map.
     `segment_key`     — salts `PERCENTAGE_SPLIT`. Auto-injected from the
                         segment's `key` field by `translate_segment`.
     """
 
     def __init__(
         self,
-        environment: EnvironmentContext,
-        dialect: Dialect | None = None,
+        evaluation_context: EvaluationContext,
+        dialect: Dialect,
         identities_alias: str = "i",
-        identifier_col: str = "i.identifier",
-        identity_key_col: str = "i.identity_key",
-        traits_col: str = "i.traits",
         segment_key: str | None = None,
     ) -> None:
-        self.environment = environment
-        self.dialect: Dialect = dialect if dialect is not None else SnowflakeDialect()
+        self.evaluation_context = evaluation_context
+        self.dialect = dialect
         self.identities_alias = identities_alias
-        self.identifier_col = identifier_col
-        self.identity_key_col = identity_key_col
-        self.traits_col = traits_col
         self.segment_key = segment_key
 
     @property
     def env_id_lit(self) -> str:
         """SQL string literal for the environment id (= EnvironmentContext.key)."""
-        return string_literal(self.environment["key"])
+        return string_literal(self.evaluation_context["environment"]["key"])
+
+    @property
+    def identity_key_expr(self) -> str:
+        return self.dialect.identity_key_expr(self.identities_alias)
 
     def trait_path(self, trait_key: str) -> str:
         """Dialect-specific path-extraction for a trait value."""
-        return self.dialect.trait_path(self.traits_col, trait_key)
+        return self.dialect.trait_path(self.identities_alias, trait_key)
 
     def jsonpath_expr(self, prop: str) -> str | None:
+        # Identity properties are bound to the IDENTITIES row at execution
+        # time, so they translate to column references rather than literals.
         if prop == "$.identity.identifier":
-            return self.identifier_col
+            return self.dialect.identifier_expr(self.identities_alias)
         if prop == "$.identity.key":
-            return self.identity_key_col
-        if prop == "$.environment.name":
-            return string_literal(self.environment["name"])
-        if prop == "$.environment.key":
-            return self.env_id_lit
-        return None
+            return self.dialect.identity_key_expr(self.identities_alias)
+        # Everything else is resolved against the eval context now and
+        # baked into the generated SQL as a literal.
+        try:
+            compiled = jsonpath_rfc9535.compile(prop)
+        except jsonpath_rfc9535.JSONPathSyntaxError:
+            return None
+        result = compiled.find_one(dict(self.evaluation_context))
+        if result is None or result.value is None:
+            return None
+        value = result.value
+        if not isinstance(value, (str, int, float, bool)):
+            return None
+        return string_literal(str(value))
 
     def with_segment_key(self, key: str) -> TranslateContext:
         return TranslateContext(
-            environment=self.environment,
+            evaluation_context=self.evaluation_context,
             dialect=self.dialect,
             identities_alias=self.identities_alias,
-            identifier_col=self.identifier_col,
-            identity_key_col=self.identity_key_col,
-            traits_col=self.traits_col,
             segment_key=key,
         )
 
@@ -281,7 +286,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             return None
         threshold = float(threshold_lit)
         if not prop:
-            value_expr = ctx.dialect.cast_string(ctx.identity_key_col)
+            value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
         elif prop.startswith("$."):
             jp = ctx.jsonpath_expr(prop)
             if jp is None:
