@@ -27,6 +27,18 @@ class Dialect(Protocol):
 
     name: str  # human-readable, used in test ids and error messages
 
+    # --- trait access ---
+
+    def trait_path(self, traits_col: str, trait_key: str) -> str:
+        """Path-extract a trait value from the IDENTITIES traits container.
+
+        The shape of `traits_col` and the path syntax both vary by SQL
+        engine: Snowflake stores traits as a single VARIANT and uses
+        `i.traits:"key"`; future Postgres dialects might use JSONB
+        (`i.traits ->> 'key'`) or a separate long-form table joined back.
+        """
+        ...
+
     # --- string operations ---
 
     def position(self, needle_lit: str, haystack_expr: str) -> str:

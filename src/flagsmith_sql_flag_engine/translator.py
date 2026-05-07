@@ -38,7 +38,12 @@ from flag_engine.context.types import (
 
 from flagsmith_sql_flag_engine.dialect import Dialect
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
-from flagsmith_sql_flag_engine.sanitiser import Sanitiser
+from flagsmith_sql_flag_engine.utils import (
+    escape_string,
+    modulo_literal,
+    numeric_literal,
+    string_literal,
+)
 
 TRANSLATABLE_OPERATORS: frozenset[str] = frozenset(
     {
@@ -124,11 +129,11 @@ class TranslateContext:
     @property
     def env_id_lit(self) -> str:
         """SQL string literal for the environment id (= EnvironmentContext.key)."""
-        return Sanitiser.string_literal(self.environment["key"])
+        return string_literal(self.environment["key"])
 
     def trait_path(self, trait_key: str) -> str:
-        """VARIANT path-extraction for a trait: `i.traits:"<key>"`."""
-        return f"{self.traits_col}:{Sanitiser.variant_path_key(trait_key)}"
+        """Dialect-specific path-extraction for a trait value."""
+        return self.dialect.trait_path(self.traits_col, trait_key)
 
     def jsonpath_expr(self, prop: str) -> str | None:
         if prop == "$.identity.identifier":
@@ -136,7 +141,7 @@ class TranslateContext:
         if prop == "$.identity.key":
             return self.identity_key_col
         if prop == "$.environment.name":
-            return Sanitiser.string_literal(self.environment["name"])
+            return string_literal(self.environment["name"])
         if prop == "$.environment.key":
             return self.env_id_lit
         return None
@@ -169,7 +174,7 @@ def _percentage_split_expr(
     recurses with doubled input; we skip).
     """
     d = ctx.dialect
-    seg_lit = Sanitiser.string_literal(seg_key)
+    seg_lit = string_literal(seg_key)
     hash_subject = f"{seg_lit} || ',' || ({ctx_value_sql})"
     h = d.md5_hex(hash_subject)
     s1 = d.parse_hex_chunk(h, 1)
@@ -216,21 +221,21 @@ def _comparison(
     if value is None:
         return None
     d = ctx.dialect
-    lit = Sanitiser.string_literal(str(value))
+    lit = string_literal(str(value))
     str_expr = expr if is_jsonpath else d.cast_string(expr)
     if op == "EQUAL":
         return f"{str_expr} = {lit}"
     if op == "NOT_EQUAL":
         return f"{str_expr} <> {lit}"
     if op == "IN":
-        items = "','".join(Sanitiser.escape_string(v.strip()) for v in str(value).split(","))
+        items = "','".join(escape_string(v.strip()) for v in str(value).split(","))
         return f"{str_expr} IN ('{items}')"
     if op == "CONTAINS":
         return d.position(lit, str_expr)
     if op == "NOT_CONTAINS":
         return f"({expr} IS NOT NULL AND NOT ({d.position(lit, str_expr)}))"
     if op in {"GREATER_THAN", "LESS_THAN", "GREATER_THAN_INCLUSIVE", "LESS_THAN_INCLUSIVE"}:
-        numeric_lit = Sanitiser.numeric_literal(value)
+        numeric_lit = numeric_literal(value)
         if numeric_lit is None:
             return None
         sql_op = {
@@ -241,7 +246,7 @@ def _comparison(
         }[op]
         return f"({expr} IS NOT NULL AND {d.cast_float(expr)} {sql_op} {numeric_lit})"
     if op == "MODULO":
-        parsed = Sanitiser.modulo_literal(value)
+        parsed = modulo_literal(value)
         if parsed is None:
             return None
         divisor_lit, remainder_lit = parsed
@@ -271,7 +276,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     if op == "PERCENTAGE_SPLIT":
         if not ctx.segment_key:
             return None
-        threshold_lit = Sanitiser.numeric_literal(val)
+        threshold_lit = numeric_literal(val)
         if threshold_lit is None:
             return None
         threshold = float(threshold_lit)
@@ -327,7 +332,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             "GREATER_THAN_INCLUSIVE": ">=",
             "LESS_THAN_INCLUSIVE": "<=",
         }[op]
-        bare_lit = Sanitiser.string_literal(bare)
+        bare_lit = string_literal(bare)
         col_str = ctx.dialect.cast_string(path)
         return (
             f"({path} IS NOT NULL AND "

@@ -74,6 +74,15 @@ class SnowflakeDialect:
     name = "snowflake"
     schema_ddl = SCHEMA_DDL
 
+    # ----- trait access -----
+
+    def trait_path(self, traits_col: str, trait_key: str) -> str:
+        # Snowflake VARIANT path syntax: `i.traits:"key"`. The key is
+        # double-quoted and any embedded double quotes are doubled per
+        # the SQL standard.
+        escaped = trait_key.replace('"', '""')
+        return f'{traits_col}:"{escaped}"'
+
     # ----- string operations -----
 
     def position(self, needle_lit: str, haystack_expr: str) -> str:
