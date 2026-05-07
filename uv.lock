@@ -405,6 +405,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "flagsmith-flag-engine" },
+    { name = "jsonpath-rfc9535" },
 ]
 
 [package.dev-dependencies]
@@ -417,7 +418,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "flagsmith-flag-engine", specifier = ">=10" }]
+requires-dist = [
+    { name = "flagsmith-flag-engine", specifier = ">=10" },
+    { name = "jsonpath-rfc9535", specifier = ">=0.2" },
+]
 
 [package.metadata.requires-dev]
 dev = [

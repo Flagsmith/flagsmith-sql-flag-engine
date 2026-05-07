@@ -13,6 +13,7 @@ classifiers = [
 ]
 dependencies = [
     "flagsmith-flag-engine>=10",
+    "jsonpath-rfc9535>=0.2",
 ]
 
 [project.urls]
