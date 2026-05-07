@@ -35,21 +35,25 @@ def _all_case_segments() -> list[tuple[int, str]]:
     _all_case_segments(),
     ids=[f"case{i}-seg{k}" for i, k in _all_case_segments()],
 )
-def test_segment_matches_engine(
+def test_translate_segment__engine_test_data_case__matches_engine(
     case_idx: int,
     seg_key: str,
     loaded_cases: list[dict],
     parity_results: dict[tuple[int, str], bool | None],
 ) -> None:
+    # Given a (case, segment) pair from engine-test-data and the pre-computed
+    # batched parity_results dict mapping each pair to its SQL-evaluated bool
     case = loaded_cases[case_idx]
     eval_ctx = case["context"]
     segment = eval_ctx["segments"][seg_key]
-
     sql_match = parity_results[(case_idx, seg_key)]
     if sql_match is None:
         pytest.skip(f"segment uses untranslatable operator (case {case_idx} seg {seg_key})")
 
+    # When the engine evaluates the same (context, segment) in-memory
     engine_match = is_context_in_segment(eval_ctx, segment)
+
+    # Then the SQL-evaluated and engine-evaluated booleans agree
     assert engine_match == sql_match, (
         f"engine={engine_match} sql={sql_match} for case={case_idx} seg={seg_key}"
     )

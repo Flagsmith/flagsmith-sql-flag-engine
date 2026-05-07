@@ -28,9 +28,13 @@ flag_engine for those segments, or surface an error at segment-edit time.
 from __future__ import annotations
 
 import re
-from typing import Any
 
-from flag_engine.context.types import EnvironmentContext, SegmentContext
+from flag_engine.context.types import (
+    EnvironmentContext,
+    SegmentCondition,
+    SegmentContext,
+    SegmentRule,
+)
 
 from flagsmith_sql_flag_engine.dialect import Dialect
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
@@ -213,7 +217,11 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 
 
 def _comparison(
-    ctx: TranslateContext, op: str, expr: str, value: object, is_jsonpath: bool = False
+    ctx: TranslateContext,
+    op: str,
+    expr: str,
+    value: object,
+    is_jsonpath: bool = False,
 ) -> str | None:
     """Emit a SQL fragment comparing `expr` against `value` per `op`.
 
@@ -237,21 +245,32 @@ def _comparison(
     if op == "NOT_CONTAINS":
         return f"({expr} IS NOT NULL AND NOT ({d.position(lit, str_expr)}))"
     if op in {"GREATER_THAN", "LESS_THAN", "GREATER_THAN_INCLUSIVE", "LESS_THAN_INCLUSIVE"}:
+        # Validate as numeric BEFORE interpolating — segment values come from
+        # `MANAGE_SEGMENTS`-permissioned users, who shouldn't be able to inject
+        # SQL via a comparator value. ValueError → untranslatable, caller
+        # falls back to the engine UDF or surfaces an error upstream.
+        try:
+            numeric_value = float(str(value))
+        except (TypeError, ValueError):
+            return None
         sql_op = {
             "GREATER_THAN": ">",
             "LESS_THAN": "<",
             "GREATER_THAN_INCLUSIVE": ">=",
             "LESS_THAN_INCLUSIVE": "<=",
         }[op]
-        return f"({expr} IS NOT NULL AND {d.cast_float(expr)} {sql_op} {value})"
+        return f"({expr} IS NOT NULL AND {d.cast_float(expr)} {sql_op} {numeric_value})"
     if op == "MODULO":
+        # Same validation discipline: divisor/remainder must parse as numbers.
         try:
-            divisor, remainder = str(value).split("|")
-            float(divisor)
-            float(remainder)
+            divisor_str, remainder_str = str(value).split("|")
+            divisor = float(divisor_str)
+            remainder = float(remainder_str)
         except (ValueError, AttributeError):
             return None
-        return f"({expr} IS NOT NULL AND ({d.mod(d.cast_number(expr), divisor)}) = {remainder})"
+        return (
+            f"({expr} IS NOT NULL AND ({d.mod(d.cast_number(expr), str(divisor))}) = {remainder})"
+        )
     if op == "REGEX":
         if not _regex_safe_for_re2(str(value)):
             return None
@@ -264,7 +283,7 @@ def _comparison(
 # ---------------------------------------------------------------------------
 
 
-def translate_condition(cond: dict[str, Any], ctx: TranslateContext) -> str | None:
+def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | None:
     op = cond["operator"]
     if op not in TRANSLATABLE_OPERATORS:
         return None
@@ -276,7 +295,10 @@ def translate_condition(cond: dict[str, Any], ctx: TranslateContext) -> str | No
     if op == "PERCENTAGE_SPLIT":
         if not ctx.segment_key:
             return None
-        threshold = float(val) if val is not None else 0.0
+        try:
+            threshold = float(str(val)) if val is not None else 0.0
+        except (TypeError, ValueError):
+            return None
         if not prop:
             value_expr = ctx.dialect.cast_string(ctx.identity_key_col)
         elif prop.startswith("$."):
@@ -345,7 +367,7 @@ def translate_condition(cond: dict[str, Any], ctx: TranslateContext) -> str | No
 # ---------------------------------------------------------------------------
 
 
-def translate_rule(rule: dict[str, Any], ctx: TranslateContext) -> str | None:
+def translate_rule(rule: SegmentRule, ctx: TranslateContext) -> str | None:
     children: list[str] = []
     for cond in rule.get("conditions") or []:
         sql = translate_condition(cond, ctx)
@@ -378,14 +400,14 @@ def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | N
     The expression goes after `WHERE i.environment_id = '<env-key>' AND ...`.
     The caller composes the surrounding `SELECT ... FROM IDENTITIES i`.
     """
-    if ctx.segment_key is None and "key" in segment:
-        ctx = ctx.with_segment_key(str(segment["key"]))
+    if ctx.segment_key is None:
+        ctx = ctx.with_segment_key(segment["key"])
     rules = segment.get("rules") or []
     if not rules:
         return "FALSE"
     rule_sql: list[str] = []
     for r in rules:
-        sql = translate_rule(dict(r), ctx)
+        sql = translate_rule(r, ctx)
         if sql is None:
             return None
         rule_sql.append(f"({sql})")
