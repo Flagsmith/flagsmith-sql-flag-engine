@@ -247,23 +247,24 @@ def _engine_in_values(value: object) -> list[str] | None:
 def _trait_typed_eq(ctx: TranslateContext, path: str, value: object, negate: bool) -> str:
     """Type-dispatched EQUAL/NOT_EQUAL on a VARIANT trait, mirroring engine
     semantics: segment value is cast to the trait's runtime type before
-    comparison; cast failure → no match (False) for both ops.
+    comparison; cast failure → no match for both ops.
 
-    Each branch is gated by `TYPEOF(...) = '...'` rather than wrapped in
-    a CASE statement; Snowflake's optimiser sometimes evaluates all CASE
-    arms eagerly (e.g. casting a VARCHAR variant to BOOLEAN even when
-    the BOOLEAN arm is unreachable for that row), and AND short-circuits
-    reliably."""
+    EQUAL is emitted as a fast string compare OR'd with type-specific
+    branches that catch the cases where the variant's `::STRING` form
+    doesn't equal the literal segment value (booleans stringify lower-
+    case; floats get expanded to scientific or full-precision forms).
+    Branches are only emitted when the segment value can be coerced to
+    that type at translate time, so a string-only segment (`"enterprise"`)
+    collapses to a single `(path)::STRING = 'enterprise'`.
+
+    NOT_EQUAL keeps the `TYPEOF`-dispatched form: it only returns True
+    when the cast succeeded *and* values differ, which an OR-of-positives
+    can't express without over-matching."""
     d = ctx.dialect
-    sql_op = "<>" if negate else "="
     str_value = str(value)
     str_lit = string_literal(str_value)
     str_path = d.cast_string(path)
-    # Engine bool cast: `lambda v: v not in ("False", "false")`. Compare via
-    # the variant's lowercase string form so we never invoke `(...)::BOOLEAN`
-    # on a non-bool variant.
-    bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
-    bool_branch = f"({str_path}) {sql_op} {bool_str_lit}"
+
     # Engine int/float cast: int(v) / float(v); ValueError → no match.
     try:
         int_lit: str | None = str(int(str_value))
@@ -273,34 +274,58 @@ def _trait_typed_eq(ctx: TranslateContext, path: str, value: object, negate: boo
         float_lit: str | None = repr(float(str_value))
     except (ValueError, TypeError):
         float_lit = None
-    no_match = "FALSE"  # engine returns False on cast failure for both EQUAL and NOT_EQUAL
-    int_branch = f"({path})::NUMBER {sql_op} {int_lit}" if int_lit is not None else no_match
-    float_branch = f"({path})::FLOAT {sql_op} {float_lit}" if float_lit is not None else no_match
+
+    if not negate:
+        # Fast string compare always present — handles VARCHAR traits and
+        # canonically-stringified INTEGER traits in one cheap branch.
+        clauses = [f"{str_path} = {str_lit}"]
+        # Engine bool cast: `lambda v: v not in ("False", "false")`. Compare
+        # against the variant's lowercase string form — Snowflake's optimiser
+        # evaluates `(...)::BOOLEAN` eagerly even when the IS_BOOLEAN guard
+        # would have short-circuited, so we must never feed a non-bool variant
+        # into a BOOLEAN cast (`100037: Boolean value 'red' is not recognized`).
+        bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
+        clauses.append(f"(IS_BOOLEAN({path}) AND {str_path} = {bool_str_lit})")
+        if float_lit is not None:
+            # Variant float `1.23` stringifies to `'1.230000000000000e+00'`-ish
+            # in Snowflake — direct string compare misses it, so a typed
+            # branch is needed. TRY_TO_DOUBLE on the string form sidesteps
+            # the same eager-eval trap as the bool branch.
+            clauses.append(
+                f"((IS_DECIMAL({path}) OR IS_DOUBLE({path}))"
+                f" AND TRY_TO_DOUBLE({str_path}) = {float_lit})"
+            )
+        return "(" + " OR ".join(clauses) + ")"
+
+    # NOT_EQUAL: per-type dispatch.
+    no_match = "FALSE"  # engine returns False on cast failure
+    bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
+    bool_branch = f"{str_path} <> {bool_str_lit}"
+    int_branch = f"({path})::NUMBER <> {int_lit}" if int_lit is not None else no_match
+    float_branch = f"({path})::FLOAT <> {float_lit}" if float_lit is not None else no_match
     return (
         f"((TYPEOF({path}) = 'BOOLEAN' AND {bool_branch})"
         f" OR (TYPEOF({path}) = 'INTEGER' AND {int_branch})"
         f" OR (TYPEOF({path}) IN ('DECIMAL', 'DOUBLE') AND {float_branch})"
         f" OR (TYPEOF({path}) NOT IN ('BOOLEAN', 'INTEGER', 'DECIMAL', 'DOUBLE')"
-        f" AND {str_path} {sql_op} {str_lit}))"
+        f" AND {str_path} <> {str_lit}))"
     )
 
 
 def _trait_typed_in(ctx: TranslateContext, path: str, value: object) -> str | None:
     """Type-dispatched IN on a VARIANT trait, mirroring engine semantics:
     int trait stringifies and looks up against the parsed string set; string
-    trait does direct lookup; other types never match."""
+    trait does direct lookup; other types never match.
+
+    Collapsed to a single `TYPEOF` gate around one string IN compare —
+    Snowflake stringifies INTEGER variants without decimals, so the same
+    `(path)::STRING IN (...)` works for both VARCHAR and INTEGER."""
     items = _engine_in_values(value)
     if items is None:
         return None
     item_lits = ",".join(string_literal(v) for v in items)
     str_path = ctx.dialect.cast_string(path)
-    return (
-        f"(CASE TYPEOF({path})"
-        f" WHEN 'INTEGER' THEN {str_path} IN ({item_lits})"
-        f" WHEN 'VARCHAR' THEN {str_path} IN ({item_lits})"
-        f" ELSE FALSE"
-        f" END)"
-    )
+    return f"(TYPEOF({path}) IN ('VARCHAR', 'INTEGER') AND {str_path} IN ({item_lits}))"
 
 
 def _comparison(
