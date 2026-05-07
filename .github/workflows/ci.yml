@@ -32,4 +32,4 @@ jobs:
         run: |
           umask 077
           printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > /tmp/snowflake_pk.p8
-      - run: make test opts="-n auto"
+      - run: make test

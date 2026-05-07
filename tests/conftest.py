@@ -1,17 +1,27 @@
 """Pytest fixtures.
 
 Unit tests run anywhere; the parity suite needs a Snowflake account. The
-parity fixture skips automatically if `SNOWFLAKE_ACCOUNT` isn't set, so
+parity fixtures skip automatically if `SNOWFLAKE_ACCOUNT` isn't set, so
 running `pytest` with no env vars only runs the unit tests.
 
 Each parity-test session creates a per-run transient `IDENTITIES_PARITY_<uuid>`
 table so concurrent CI runs don't step on each other. Schema mirrors
 `SnowflakeDialect.SCHEMA_DDL`: 4 typed columns + a `traits` VARIANT.
 Table is dropped on teardown.
+
+The parity fixtures are batched to keep Snowflake round-trips down:
+
+  - All test-case identities go into the scratch table in a single
+    `INSERT INTO ... VALUES (...), (...), ...` statement.
+  - All test-case (segment, identity) pairs are evaluated in a single
+    `SELECT ... UNION ALL ...` mega-query, returning a `(case_idx, seg_key)
+    -> bool` dict. Per-test parametrised tests then do an in-memory dict
+    lookup. Two Snowflake round-trips for the whole suite.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import uuid
@@ -20,6 +30,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from flag_engine.context.types import EnvironmentContext
+
+from flagsmith_sql_flag_engine import TranslateContext, translate_segment
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
@@ -100,3 +113,94 @@ def parity_env_key(case_idx: int, original: str) -> str:
     cases (or cases that share an `environment.key` in the source data)
     don't see each other's identities."""
     return f"parity-{case_idx}-{original}"
+
+
+def _q(s: str) -> str:
+    return s.replace("'", "''")
+
+
+@pytest.fixture(scope="session")
+def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[dict]]:
+    """Load every test case's identity into the scratch IDENTITIES table
+    in a single multi-row INSERT. Returns the list of cases (with
+    overridden `environment.key` so engine and SQL agree on what env to
+    filter by). One Snowflake round-trip for all 102 cases.
+    """
+    cases = load_test_cases()
+    if not cases:
+        pytest.skip("engine-test-data submodule not initialised")
+    overridden: list[dict] = []
+    selects: list[str] = []
+    for i, case in enumerate(cases):
+        case = copy.deepcopy(case)
+        ctx = case["context"]
+        env = ctx.get("environment") or {}
+        env["key"] = parity_env_key(i, env.get("key", ""))
+        env_id = _q(env["key"])
+
+        ident = ctx.get("identity") or {}
+        identifier = _q(ident.get("identifier") or "")
+        identity_key = _q(ident.get("key") or "")
+        identity_id = i + 1
+        traits = ident.get("traits") or {}
+        if traits:
+            traits_lit = f"PARSE_JSON('{_q(json.dumps(traits))}')"
+        else:
+            traits_lit = "NULL"
+        selects.append(
+            f"SELECT '{env_id}', {identity_id}, '{identifier}', '{identity_key}', {traits_lit}"
+        )
+        overridden.append(case)
+
+    snowflake_session.sql(
+        f"INSERT INTO {parity_table} (environment_id, id, identifier, identity_key, traits) "
+        + "\nUNION ALL\n".join(selects)
+    ).collect()
+    yield overridden
+
+
+@pytest.fixture(scope="session")
+def parity_results(
+    snowflake_session: Any,
+    parity_table: str,
+    loaded_cases: list[dict],
+) -> dict[tuple[int, str], bool | None]:
+    """Run every (case, segment) pair's translated SQL in one mega-query
+    and return a `(case_idx, seg_key) -> bool | None` dict. `None` means
+    the segment uses an operator the translator can't handle (test will
+    pytest.skip on that key).
+
+    One Snowflake round-trip for all 510 pairs.
+    """
+    pairs: list[tuple[int, str, str | None, str]] = []
+    select_clauses: list[str] = []
+    for case_idx, case in enumerate(loaded_cases):
+        eval_ctx = case["context"]
+        env: EnvironmentContext = eval_ctx["environment"]
+        for seg_key, segment in (eval_ctx.get("segments") or {}).items():
+            tr_ctx = TranslateContext(environment=env)
+            sql = translate_segment(segment, tr_ctx)
+            pairs.append((case_idx, seg_key, sql, env["key"]))
+
+    for i, (_case_idx, _seg_key, sql, env_key) in enumerate(pairs):
+        if sql is None:
+            continue
+        env_lit = _q(env_key)
+        select_clauses.append(
+            f"SELECT {i} AS pair_id, "
+            f"EXISTS (SELECT 1 FROM {parity_table} i "
+            f"WHERE i.environment_id = '{env_lit}' AND ({sql})) AS m"
+        )
+
+    results: dict[tuple[int, str], bool | None] = {}
+    if select_clauses:
+        rows = snowflake_session.sql("\nUNION ALL\n".join(select_clauses)).collect()
+        for row in rows:
+            i = int(row["PAIR_ID"])
+            case_idx, seg_key, _sql, _env = pairs[i]
+            results[(case_idx, seg_key)] = bool(row["M"])
+    # Fill in untranslatable pairs as None so test parametrisation can skip.
+    for case_idx, seg_key, sql, _env in pairs:
+        if sql is None:
+            results[(case_idx, seg_key)] = None
+    return results
