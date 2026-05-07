@@ -22,8 +22,8 @@ Homepage = "https://github.com/Flagsmith/flagsmith-sql-flag-engine"
 dev = [
     "pytest>=8",
     "pytest-xdist>=3",
-    "ruff>=0.6",
     "mypy>=1.10",
+    "pre-commit>=4",
     "snowflake-snowpark-python>=1.20",
 ]
 

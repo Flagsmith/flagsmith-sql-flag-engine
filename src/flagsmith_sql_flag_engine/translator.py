@@ -27,7 +27,7 @@ flag_engine for those segments, or surface an error at segment-edit time.
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any
 
 from flag_engine.context.types import EnvironmentContext, SegmentContext
 
@@ -56,7 +56,7 @@ TRANSLATABLE_OPERATORS: frozenset[str] = frozenset(
 
 # Conservative check for Python-re features RE2 doesn't support.
 _RE2_UNSAFE = re.compile(
-    r"\\\d"        # backreference like \1 .. \9
+    r"\\\d"  # backreference like \1 .. \9
     r"|\(\?[=!<]"  # lookahead / lookbehind / negative variants
 )
 
@@ -74,9 +74,9 @@ def _q(s: str) -> str:
 # `int(md5_hex, 16) % 9999`; we split the 32-hex digest into four 8-hex
 # chunks, parse each as a 32-bit int, and combine via modular arithmetic.
 # Constants are (16^24, 16^16, 16^8) mod 9999, precomputed.
-_HASH_CONST_HIGH = 7291   # 16^24 mod 9999
-_HASH_CONST_MID = 1897    # 16^16 mod 9999
-_HASH_CONST_LOW = 6835    # 16^8 mod 9999
+_HASH_CONST_HIGH = 7291  # 16^24 mod 9999
+_HASH_CONST_MID = 1897  # 16^16 mod 9999
+_HASH_CONST_LOW = 6835  # 16^8 mod 9999
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +104,12 @@ class TranslateContext:
     def __init__(
         self,
         environment: EnvironmentContext,
-        dialect: Optional[Dialect] = None,
+        dialect: Dialect | None = None,
         traits_table: str = "TRAITS",
         identifier_col: str = "i.identifier",
         identity_key_col: str = "i.identity_key",
         identity_id_col: str = "i.id",
-        segment_key: Optional[str] = None,
+        segment_key: str | None = None,
     ) -> None:
         self.environment = environment
         self.dialect: Dialect = dialect if dialect is not None else SnowflakeDialect()
@@ -124,7 +124,7 @@ class TranslateContext:
         """SQL string literal for the environment id (= EnvironmentContext.key)."""
         return f"'{_q(self.environment['key'])}'"
 
-    def jsonpath_expr(self, prop: str) -> Optional[str]:
+    def jsonpath_expr(self, prop: str) -> str | None:
         if prop == "$.identity.identifier":
             return self.identifier_col
         if prop == "$.identity.key":
@@ -135,7 +135,7 @@ class TranslateContext:
             return self.env_id_lit
         return None
 
-    def with_segment_key(self, key: str) -> "TranslateContext":
+    def with_segment_key(self, key: str) -> TranslateContext:
         return TranslateContext(
             environment=self.environment,
             dialect=self.dialect,
@@ -171,10 +171,7 @@ def _percentage_split_expr(
     s3 = d.parse_hex_chunk(h, 17)
     s4 = d.parse_hex_chunk(h, 25)
     weighted = (
-        f"{s1} * {_HASH_CONST_HIGH}"
-        f" + {s2} * {_HASH_CONST_MID}"
-        f" + {s3} * {_HASH_CONST_LOW}"
-        f" + {s4}"
+        f"{s1} * {_HASH_CONST_HIGH} + {s2} * {_HASH_CONST_MID} + {s3} * {_HASH_CONST_LOW} + {s4}"
     )
     return f"({d.mod(weighted, '9999')} / 9998.0 * 100.0 <= {float(threshold)})"
 
@@ -211,9 +208,7 @@ def _exists_for_trait(
     )
 
 
-def _exists_any_trait(
-    ctx: TranslateContext, trait_key: str, negate: bool = False
-) -> str:
+def _exists_any_trait(ctx: TranslateContext, trait_key: str, negate: bool = False) -> str:
     not_kw = "NOT " if negate else ""
     return (
         f"{not_kw}EXISTS ("
@@ -225,7 +220,7 @@ def _exists_any_trait(
     )
 
 
-def _trait_predicate(ctx: TranslateContext, op: str, value: object) -> Optional[str]:
+def _trait_predicate(ctx: TranslateContext, op: str, value: object) -> str | None:
     """SQL fragment that filters a TRAITS row given operator + value.
 
     Goes inside the `AND <body>` of an EXISTS subquery. Operates on
@@ -251,10 +246,7 @@ def _trait_predicate(ctx: TranslateContext, op: str, value: object) -> Optional[
             float(remainder)
         except (ValueError, AttributeError):
             return None
-        return (
-            f"integer_value IS NOT NULL "
-            f"AND ({d.mod('integer_value', divisor)}) = {remainder}"
-        )
+        return f"integer_value IS NOT NULL AND ({d.mod('integer_value', divisor)}) = {remainder}"
     if op in {
         "GREATER_THAN",
         "LESS_THAN",
@@ -274,8 +266,7 @@ def _trait_predicate(ctx: TranslateContext, op: str, value: object) -> Optional[
             return None
         pattern_lit = f"'{_q(str(value))}'"
         return (
-            f"string_value IS NOT NULL "
-            f"AND {d.regexp_anchored_match('string_value', pattern_lit)}"
+            f"string_value IS NOT NULL AND {d.regexp_anchored_match('string_value', pattern_lit)}"
         )
     return None
 
@@ -287,7 +278,7 @@ def _trait_predicate(ctx: TranslateContext, op: str, value: object) -> Optional[
 
 def _direct_comparison(
     ctx: TranslateContext, op: str, expr: str, value: object, is_jsonpath: bool
-) -> Optional[str]:
+) -> str | None:
     if value is None:
         return None
     d = ctx.dialect
@@ -324,9 +315,7 @@ def _direct_comparison(
 # ---------------------------------------------------------------------------
 
 
-def translate_condition(
-    cond: dict, ctx: TranslateContext
-) -> Optional[str]:
+def translate_condition(cond: dict[str, Any], ctx: TranslateContext) -> str | None:
     op = cond["operator"]
     if op not in TRANSLATABLE_OPERATORS:
         return None
@@ -338,18 +327,19 @@ def translate_condition(
     if op == "PERCENTAGE_SPLIT":
         if not ctx.segment_key:
             return None
+        threshold = float(val) if val is not None else 0.0
         if not prop:
             return _percentage_split_expr(
-                ctx, ctx.segment_key, ctx.dialect.cast_string(ctx.identity_key_col), float(val)
+                ctx, ctx.segment_key, ctx.dialect.cast_string(ctx.identity_key_col), threshold
             )
         if prop.startswith("$."):
             jp = ctx.jsonpath_expr(prop)
             if jp is None:
                 return None
             return _percentage_split_expr(
-                ctx, ctx.segment_key, ctx.dialect.cast_string(jp), float(val)
+                ctx, ctx.segment_key, ctx.dialect.cast_string(jp), threshold
             )
-        body = _percentage_split_expr(ctx, ctx.segment_key, "string_value", float(val))
+        body = _percentage_split_expr(ctx, ctx.segment_key, "string_value", threshold)
         return _exists_for_trait(ctx, prop, body)
 
     if not prop:
@@ -412,7 +402,7 @@ def translate_condition(
 # ---------------------------------------------------------------------------
 
 
-def translate_rule(rule: dict, ctx: TranslateContext) -> Optional[str]:
+def translate_rule(rule: dict[str, Any], ctx: TranslateContext) -> str | None:
     children: list[str] = []
     for cond in rule.get("conditions") or []:
         sql = translate_condition(cond, ctx)
@@ -437,9 +427,7 @@ def translate_rule(rule: dict, ctx: TranslateContext) -> Optional[str]:
     return None
 
 
-def translate_segment(
-    segment: SegmentContext, ctx: TranslateContext
-) -> Optional[str]:
+def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | None:
     """Return a SQL `WHERE` expression for the segment, or None if any
     condition uses an operator the translator can't handle (REGEX with
     backreferences or lookarounds).
@@ -454,7 +442,7 @@ def translate_segment(
         return "FALSE"
     rule_sql: list[str] = []
     for r in rules:
-        sql = translate_rule(r, ctx)
+        sql = translate_rule(dict(r), ctx)
         if sql is None:
             return None
         rule_sql.append(f"({sql})")

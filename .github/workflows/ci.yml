@@ -6,27 +6,25 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-unit:
-    name: Lint + unit tests
+  test:
+    name: Typecheck + unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@v7
         with:
-          version: latest
-      - run: uv sync --all-groups
-      - run: uv run ruff check
-      - run: uv run mypy
-      - run: uv run pytest -m "not parity"
+          enable-cache: true
+      - run: make typecheck
+      - run: make test opts="-m 'not parity'"
 
   parity:
     name: Engine parity (Snowflake)
     runs-on: ubuntu-latest
     # Skip parity on forked-PR runs — secrets aren't available there.
     if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
-    needs: lint-and-unit
+    needs: test
     env:
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -39,10 +37,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
       - name: Write Snowflake key file
         run: |
           umask 077
           printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > /tmp/snowflake_pk.p8
-      - run: uv sync --all-groups
-      - run: uv run pytest -m parity -n auto
+      - run: make test opts="-m parity -n auto"

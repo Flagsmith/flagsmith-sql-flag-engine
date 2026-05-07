@@ -17,14 +17,11 @@ from flag_engine.context.types import EnvironmentContext
 from flag_engine.segments.evaluator import is_context_in_segment
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
-
 from tests.conftest import load_test_cases, parity_env_key
 
 
 @pytest.fixture(scope="session")
-def loaded_cases(
-    snowflake_session: Any, parity_tables: tuple[str, str]
-) -> Iterator[list[dict]]:
+def loaded_cases(snowflake_session: Any, parity_tables: tuple[str, str]) -> Iterator[list[dict]]:
     """Load every test case's identity + traits into the scratch tables under a
     per-case unique env key. Returns the list of cases (with overridden
     `environment.key` so engine and SQL agree on what env to filter by).
@@ -62,25 +59,21 @@ def loaded_cases(
                         f"('{env_id}', {identity_id}, '{kq}', NULL, NULL, NULL, {str(v).upper()})"
                     )
                 elif isinstance(v, int):
-                    rows.append(
-                        f"('{env_id}', {identity_id}, '{kq}', NULL, {v}, NULL, NULL)"
-                    )
+                    rows.append(f"('{env_id}', {identity_id}, '{kq}', NULL, {v}, NULL, NULL)")
                 elif isinstance(v, float):
-                    rows.append(
-                        f"('{env_id}', {identity_id}, '{kq}', NULL, NULL, {v}, NULL)"
-                    )
+                    rows.append(f"('{env_id}', {identity_id}, '{kq}', NULL, NULL, {v}, NULL)")
                 elif v is None:
                     continue
                 else:
                     sq = str(v).replace("'", "''")
-                    rows.append(
-                        f"('{env_id}', {identity_id}, '{kq}', '{sq}', NULL, NULL, NULL)"
-                    )
+                    rows.append(f"('{env_id}', {identity_id}, '{kq}', '{sq}', NULL, NULL, NULL)")
             if rows:
+                cols = (
+                    "environment_id, identity_id, trait_key, "
+                    "string_value, integer_value, float_value, boolean_value"
+                )
                 snowflake_session.sql(
-                    f"INSERT INTO {traits_table} "
-                    f"(environment_id, identity_id, trait_key, string_value, integer_value, float_value, boolean_value) "
-                    f"VALUES {', '.join(rows)}"
+                    f"INSERT INTO {traits_table} ({cols}) VALUES {', '.join(rows)}"
                 ).collect()
         out.append(case)
     yield out
@@ -91,7 +84,7 @@ def _all_case_segments() -> list[tuple[int, str]]:
     cases = load_test_cases()
     out: list[tuple[int, str]] = []
     for i, case in enumerate(cases):
-        for seg_key in (case.get("context", {}).get("segments") or {}):
+        for seg_key in case.get("context", {}).get("segments") or {}:
             out.append((i, seg_key))
     return out
 

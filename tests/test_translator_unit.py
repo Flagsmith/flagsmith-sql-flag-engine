@@ -25,9 +25,7 @@ def test_simple_equal_emits_exists_against_traits() -> None:
         "rules": [
             {
                 "type": "ALL",
-                "conditions": [
-                    {"operator": "EQUAL", "property": "plan", "value": "growth"}
-                ],
+                "conditions": [{"operator": "EQUAL", "property": "plan", "value": "growth"}],
             }
         ],
     }
@@ -46,9 +44,7 @@ def test_in_operator_translates_csv_value() -> None:
         "rules": [
             {
                 "type": "ALL",
-                "conditions": [
-                    {"operator": "IN", "property": "country", "value": "GB,US,DE"}
-                ],
+                "conditions": [{"operator": "IN", "property": "country", "value": "GB,US,DE"}],
             }
         ],
     }
@@ -64,9 +60,7 @@ def test_is_set_emits_exists_any_trait() -> None:
         "rules": [
             {
                 "type": "ALL",
-                "conditions": [
-                    {"operator": "IS_SET", "property": "beta_cohort", "value": ""}
-                ],
+                "conditions": [{"operator": "IS_SET", "property": "beta_cohort", "value": ""}],
             }
         ],
     }
@@ -83,9 +77,7 @@ def test_is_not_set_emits_not_exists() -> None:
         "rules": [
             {
                 "type": "ALL",
-                "conditions": [
-                    {"operator": "IS_NOT_SET", "property": "x", "value": ""}
-                ],
+                "conditions": [{"operator": "IS_NOT_SET", "property": "x", "value": ""}],
             }
         ],
     }
@@ -101,9 +93,7 @@ def test_percentage_split_inlines_md5_arithmetic() -> None:
         "rules": [
             {
                 "type": "ALL",
-                "conditions": [
-                    {"operator": "PERCENTAGE_SPLIT", "property": "", "value": "50"}
-                ],
+                "conditions": [{"operator": "PERCENTAGE_SPLIT", "property": "", "value": "50"}],
             }
         ],
     }
@@ -188,9 +178,7 @@ def test_regex_with_lookahead_returns_none() -> None:
         "rules": [
             {
                 "type": "ALL",
-                "conditions": [
-                    {"operator": "REGEX", "property": "x", "value": "foo(?=bar)"}
-                ],
+                "conditions": [{"operator": "REGEX", "property": "x", "value": "foo(?=bar)"}],
             }
         ],
     }
@@ -204,9 +192,7 @@ def test_none_rule_emits_negation() -> None:
         "rules": [
             {
                 "type": "NONE",
-                "conditions": [
-                    {"operator": "EQUAL", "property": "p", "value": "v"}
-                ],
+                "conditions": [{"operator": "EQUAL", "property": "p", "value": "v"}],
             }
         ],
     }

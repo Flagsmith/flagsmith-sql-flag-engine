@@ -78,9 +78,12 @@ Postgres) means writing one class.
 ## Development
 
 ```bash
-uv sync                       # install dev deps (auto-includes dev group)
-uv run pytest -m "not parity" # unit tests, no Snowflake required
-uv run pytest -m parity       # parity suite, Snowflake creds required
-uv run ruff check
-uv run mypy
+make install                  # uv sync + pre-commit install
+make lint                     # run pre-commit hooks across the tree
+make typecheck                # mypy
+make test                     # unit tests, no Snowflake required
+make test opts="-m parity"    # parity suite, Snowflake creds required
 ```
+
+Ruff (lint + format) runs as a pre-commit hook on every commit. Mypy
+runs as a `make typecheck` hook on staged Python files.

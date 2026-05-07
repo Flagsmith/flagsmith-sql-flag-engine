@@ -28,9 +28,7 @@ ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
 
 
 def _snowflake_creds_present() -> bool:
-    return bool(os.environ.get("SNOWFLAKE_ACCOUNT")) and bool(
-        os.environ.get("SNOWFLAKE_USER")
-    )
+    return bool(os.environ.get("SNOWFLAKE_ACCOUNT")) and bool(os.environ.get("SNOWFLAKE_USER"))
 
 
 @pytest.fixture(scope="session")
