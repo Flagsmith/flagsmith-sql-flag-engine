@@ -1,6 +1,32 @@
 """Snowflake dialect: SQL fragments tailored to Snowflake's function set.
 
-Notable choices:
+## Expected schema
+
+The translator emits predicates against a single `IDENTITIES` table with
+a fixed shape: 4 typed columns (`environment_id`, `id`, `identifier`,
+`identity_key`) plus one `VARIANT` column `traits` holding the
+identity's full trait map as a JSON-shaped object. Trait keys are
+*data* in the VARIANT, not schema columns — adding new trait keys never
+requires DDL.
+
+This was chosen over column-per-trait wide-form because:
+  - Snowflake caps tables at ~3,000 columns; SaaS-aggregated trait
+    vocabularies cross that.
+  - `ALTER TABLE ADD COLUMN` on the write path needs elevated grants and
+    coordination with the CDC pipeline. VARIANT side-steps both.
+  - Snowflake's VARIANT path-extraction is columnar, not a JSON parse
+    per row; perf is within ~30% of typed columns for simple key
+    lookups based on Snowflake's published benchmarks.
+
+The *slow* PoC shape that VARIANT might be confused with was
+`OBJECT_AGG` at query time over a long-form `TRAITS` table (the CTE
+joined IDENTITIES + TRAITS and aggregated the trait map per row, every
+query — 245s at 100M). Here the VARIANT is *pre-materialised* by the
+CDC pipeline; query-time it's a single columnar read with subkey
+extraction. Different operation, different perf.
+
+## Notable choices
+
   - `MD5_HEX` returns the 32-char hex digest directly.
   - Hex-to-int parsing uses `TO_NUMBER(SUBSTR(hex, n, 8), 'XXXXXXXX')`,
     producing a non-negative number that fits Snowflake's 38-digit NUMBER.
@@ -13,9 +39,40 @@ Notable choices:
 
 from __future__ import annotations
 
+# Canonical schema the translator expects. Run this once when standing up
+# a Snowflake-backed Flagsmith installation; the CDC pipeline that
+# materialises IDENTITIES from the source-of-truth feed populates the
+# `traits` VARIANT with the identity's trait map. New trait keys appear
+# as new keys inside the VARIANT — no DDL required.
+SCHEMA_DDL = """\
+CREATE TABLE IF NOT EXISTS IDENTITIES (
+    -- environment.key from EnvironmentContext; used as the env partition
+    environment_id STRING NOT NULL,
+
+    -- stable per-identity row id
+    id NUMBER NOT NULL,
+
+    -- the identity's external identifier, exposed as $.identity.identifier
+    identifier STRING NOT NULL,
+
+    -- the SDK-side composite identity key, exposed as $.identity.key
+    identity_key STRING NOT NULL,
+
+    -- the identity's full trait map: {"plan": "growth", "country": "GB", ...}.
+    -- Trait keys are object keys; Snowflake stores VARIANT as columnar-encoded
+    -- JSON-ish so subkey lookups are vectorised and fast. NULL when the
+    -- identity has no traits.
+    traits VARIANT,
+
+    PRIMARY KEY (environment_id, id)
+)
+CLUSTER BY (environment_id, id);
+"""
+
 
 class SnowflakeDialect:
     name = "snowflake"
+    schema_ddl = SCHEMA_DDL
 
     # ----- string operations -----
 

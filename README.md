@@ -4,10 +4,11 @@ SQL translator for Flagsmith segment predicates.
 
 Where the Python and Rust engines evaluate `is_context_in_segment` directly,
 this engine takes a `SegmentContext` and emits a SQL `WHERE` expression. The
-SQL goes against an `IDENTITIES` table (one row per identity) plus a `TRAITS`
-table (long-form, one row per identity-trait pair); trait-bound conditions
-become `EXISTS` subqueries. `PERCENTAGE_SPLIT` and `:semver`-marked
-comparators compile to inline pure-SQL — no UDF call required at runtime.
+SQL goes against a single `IDENTITIES` table — one row per identity, with
+the identity's full trait map held in a `traits` `VARIANT` column. Trait
+keys are *data* in the VARIANT, not schema columns; new keys never require
+DDL. `PERCENTAGE_SPLIT` and `:semver`-marked comparators compile to inline
+pure-SQL — no UDF call required at runtime.
 
 ## Quickstart
 
@@ -27,22 +28,56 @@ where_expr = translate_segment(segment, ctx)
 #   WHERE i.environment_id = 'n9fbf9h3v4fFgH3U3ngWhb' AND ({where_expr})
 ```
 
-`environment_id` in the `IDENTITIES` and `TRAITS` tables is a string column
-holding `EnvironmentContext.key` directly — the same identifier the engine
-uses, no separate integer PK.
+`environment_id` in the `IDENTITIES` table is a string column holding
+`EnvironmentContext.key` directly — the same identifier the engine uses,
+no separate integer PK.
 
 `translate_segment` returns `None` if the segment uses an operator the
 translator can't handle today (REGEX with backreferences or lookarounds —
 RE2 doesn't support them). Callers should fall back to the Python engine for
 those segments, or surface an error at segment-edit time.
 
+## Schema
+
+Each dialect publishes the table layout it expects via a `schema_ddl`
+constant. For Snowflake:
+
+```sql
+CREATE TABLE IF NOT EXISTS IDENTITIES (
+    environment_id STRING NOT NULL,
+    id NUMBER NOT NULL,
+    identifier STRING NOT NULL,
+    identity_key STRING NOT NULL,
+    traits VARIANT,
+    PRIMARY KEY (environment_id, id)
+)
+CLUSTER BY (environment_id, id);
+```
+
+Run this once when standing up a Snowflake-backed Flagsmith installation.
+The CDC pipeline that materialises `IDENTITIES` from the source-of-truth
+trait stream populates the `traits` VARIANT with the identity's full trait
+map: `{"plan": "growth", "country": "GB", ...}`. New trait keys appear as
+new keys inside the VARIANT — no `ALTER TABLE`, no DDL on the write path.
+
+The `traits` VARIANT is *pre-materialised* by the CDC pipeline. It's not
+a long-form join + aggregate at query time (which would be slow); query
+time it's a single columnar read with subkey extraction.
+
+Programmatic access:
+
+```python
+from flagsmith_sql_flag_engine.dialects.snowflake import SCHEMA_DDL
+print(SCHEMA_DDL)
+```
+
 ## Engine parity
 
 Validated against [Flagsmith/engine-test-data](https://github.com/Flagsmith/engine-test-data),
 the test suite all engine implementations are tested against. The parity
-suite loads each test case's identity + traits into a Snowflake scratch
-schema, translates the case's segments, runs the generated SQL, and
-compares to `flag_engine.is_context_in_segment`.
+suite loads each test case's identity into a Snowflake scratch table,
+translates the case's segments, runs the generated SQL, and compares to
+`flag_engine.is_context_in_segment`.
 
 To run the parity suite locally:
 
@@ -67,7 +102,7 @@ Postgres) means writing one class.
 | Operator                                     | Translatable | Notes                                                 |
 | -------------------------------------------- | :----------: | ----------------------------------------------------- |
 | `EQUAL`, `NOT_EQUAL`, `IN`                   |     yes      |                                                       |
-| `IS_SET`, `IS_NOT_SET`                       |     yes      | `EXISTS`/`NOT EXISTS` on `TRAITS`                     |
+| `IS_SET`, `IS_NOT_SET`                       |     yes      | `traits:"<key>" IS NOT NULL` / `IS NULL`              |
 | `CONTAINS`, `NOT_CONTAINS`                   |     yes      |                                                       |
 | `GREATER_THAN`, `LESS_THAN` (+ `_INCLUSIVE`) |     yes      |                                                       |
 | `MODULO`                                     |     yes      |                                                       |

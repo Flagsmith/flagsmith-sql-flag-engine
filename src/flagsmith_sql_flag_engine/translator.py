@@ -1,9 +1,10 @@
 """Translate `SegmentContext` predicate trees into SQL `WHERE` expressions.
 
 The translator emits a predicate that goes against an `IDENTITIES` table
-(aliased `i`) directly. Trait-bound conditions become `EXISTS` subqueries
-against a `TRAITS` table; `PERCENTAGE_SPLIT` and `:semver`-marked
-comparators compile to inline pure-SQL using the active `Dialect`.
+holding a `traits` VARIANT column (per `SnowflakeDialect.SCHEMA_DDL`).
+Trait-bound conditions become VARIANT path-extractions
+(`i.traits:"<key>"`); `PERCENTAGE_SPLIT` and `:semver`-marked comparators
+compile to inline pure-SQL using the active `Dialect`.
 
 Output shape::
 
@@ -14,9 +15,9 @@ Output shape::
 The caller is responsible for the surrounding query. The translator only
 produces the predicate.
 
-`environment_id` in the `IDENTITIES` and `TRAITS` tables is a string column
-holding `EnvironmentContext.key` — the same identifier the engine uses.
-There is no separate integer PK.
+`environment_id` in the `IDENTITIES` table is a string column holding
+`EnvironmentContext.key` — the same identifier the engine uses. There is
+no separate integer PK.
 
 Returns `None` if any condition uses an untranslatable operator —
 specifically REGEX patterns containing backreferences or lookarounds
@@ -70,6 +71,17 @@ def _q(s: str) -> str:
     return s.replace("'", "''")
 
 
+def _quote_variant_key(name: str) -> str:
+    """Double-quote a key for VARIANT path-extraction (`v:"key"`).
+
+    Trait keys come from user-provided segment definitions and may contain
+    characters that need quoting (hyphens, dots, etc.). Snowflake's VARIANT
+    path syntax accepts double-quoted keys with arbitrary Unicode; embedded
+    double quotes get doubled per the SQL standard.
+    """
+    return '"' + name.replace('"', '""') + '"'
+
+
 # Constants for chunked MD5-mod-9999 hash. The engine computes
 # `int(md5_hex, 16) % 9999`; we split the 32-hex digest into four 8-hex
 # chunks, parse each as a 32-bit int, and combine via modular arithmetic.
@@ -88,15 +100,16 @@ class TranslateContext:
     """Inputs the translator needs to produce a query for a specific shape.
 
     `environment`     — flag_engine `EnvironmentContext` TypedDict
-                        (`{"key": str, "name": str}`). `key` is the identifier
-                        used as `environment_id` in the `IDENTITIES` and
-                        `TRAITS` tables; `name` is referenced by
-                        `$.environment.name` JSONPath properties.
+                        (`{"key": str, "name": str}`). `key` is used as
+                        `environment_id` in the `IDENTITIES` table; `name`
+                        is referenced by `$.environment.name` JSONPath
+                        properties.
     `dialect`         — implementation of the `Dialect` protocol.
-    `traits_table`    — `TRAITS` table identifier (optionally schema-qualified).
-    `identifier_col`  — column on alias `i` for `$.identity.identifier`.
-    `identity_key_col` — column on alias `i` for `$.identity.key`.
-    `identity_id_col` — column on alias `i` joined to `TRAITS.identity_id`.
+    `identities_alias` — table alias for `IDENTITIES` in the surrounding
+                        query (default `i`).
+    `identifier_col`  — column on the alias for `$.identity.identifier`.
+    `identity_key_col` — column on the alias for `$.identity.key`.
+    `traits_col`      — VARIANT column holding the identity's trait map.
     `segment_key`     — salts `PERCENTAGE_SPLIT`. Auto-injected from the
                         segment's `key` field by `translate_segment`.
     """
@@ -105,24 +118,28 @@ class TranslateContext:
         self,
         environment: EnvironmentContext,
         dialect: Dialect | None = None,
-        traits_table: str = "TRAITS",
+        identities_alias: str = "i",
         identifier_col: str = "i.identifier",
         identity_key_col: str = "i.identity_key",
-        identity_id_col: str = "i.id",
+        traits_col: str = "i.traits",
         segment_key: str | None = None,
     ) -> None:
         self.environment = environment
         self.dialect: Dialect = dialect if dialect is not None else SnowflakeDialect()
-        self.traits_table = traits_table
+        self.identities_alias = identities_alias
         self.identifier_col = identifier_col
         self.identity_key_col = identity_key_col
-        self.identity_id_col = identity_id_col
+        self.traits_col = traits_col
         self.segment_key = segment_key
 
     @property
     def env_id_lit(self) -> str:
         """SQL string literal for the environment id (= EnvironmentContext.key)."""
         return f"'{_q(self.environment['key'])}'"
+
+    def trait_path(self, trait_key: str) -> str:
+        """VARIANT path-extraction for a trait: `i.traits:"<key>"`."""
+        return f"{self.traits_col}:{_quote_variant_key(trait_key)}"
 
     def jsonpath_expr(self, prop: str) -> str | None:
         if prop == "$.identity.identifier":
@@ -139,10 +156,10 @@ class TranslateContext:
         return TranslateContext(
             environment=self.environment,
             dialect=self.dialect,
-            traits_table=self.traits_table,
+            identities_alias=self.identities_alias,
             identifier_col=self.identifier_col,
             identity_key_col=self.identity_key_col,
-            identity_id_col=self.identity_id_col,
+            traits_col=self.traits_col,
             segment_key=key,
         )
 
@@ -189,96 +206,20 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# EXISTS-subquery builders for trait-bound predicates.
+# Trait-bound and direct comparisons. Both go against IDENTITIES alias `i`
+# directly: trait conditions read `i."<trait>"`, JSONPath conditions read
+# the appropriate identity column or env literal.
 # ---------------------------------------------------------------------------
 
 
-def _exists_for_trait(
-    ctx: TranslateContext, trait_key: str, body: str, negate: bool = False
-) -> str:
-    not_kw = "NOT " if negate else ""
-    return (
-        f"{not_kw}EXISTS ("
-        f"SELECT 1 FROM {ctx.traits_table} t "
-        f"WHERE t.environment_id = {ctx.env_id_lit} "
-        f"AND t.identity_id = {ctx.identity_id_col} "
-        f"AND t.trait_key = '{_q(trait_key)}' "
-        f"AND {body}"
-        f")"
-    )
-
-
-def _exists_any_trait(ctx: TranslateContext, trait_key: str, negate: bool = False) -> str:
-    not_kw = "NOT " if negate else ""
-    return (
-        f"{not_kw}EXISTS ("
-        f"SELECT 1 FROM {ctx.traits_table} t "
-        f"WHERE t.environment_id = {ctx.env_id_lit} "
-        f"AND t.identity_id = {ctx.identity_id_col} "
-        f"AND t.trait_key = '{_q(trait_key)}'"
-        f")"
-    )
-
-
-def _trait_predicate(ctx: TranslateContext, op: str, value: object) -> str | None:
-    """SQL fragment that filters a TRAITS row given operator + value.
-
-    Goes inside the `AND <body>` of an EXISTS subquery. Operates on
-    `string_value` / `integer_value` / `float_value` columns.
-    """
-    d = ctx.dialect
-    if op == "EQUAL":
-        return f"string_value = '{_q(str(value))}'"
-    if op == "NOT_EQUAL":
-        return f"string_value <> '{_q(str(value))}'"
-    if op == "IN":
-        items = "','".join(_q(v.strip()) for v in str(value).split(","))
-        return f"string_value IN ('{items}')"
-    if op == "CONTAINS":
-        return d.position(f"'{_q(str(value))}'", "string_value")
-    if op == "NOT_CONTAINS":
-        needle_lit = f"'{_q(str(value))}'"
-        return f"string_value IS NOT NULL AND NOT ({d.position(needle_lit, 'string_value')})"
-    if op == "MODULO":
-        try:
-            divisor, remainder = str(value).split("|")
-            float(divisor)
-            float(remainder)
-        except (ValueError, AttributeError):
-            return None
-        return f"integer_value IS NOT NULL AND ({d.mod('integer_value', divisor)}) = {remainder}"
-    if op in {
-        "GREATER_THAN",
-        "LESS_THAN",
-        "GREATER_THAN_INCLUSIVE",
-        "LESS_THAN_INCLUSIVE",
-    }:
-        sql_op = {
-            "GREATER_THAN": ">",
-            "LESS_THAN": "<",
-            "GREATER_THAN_INCLUSIVE": ">=",
-            "LESS_THAN_INCLUSIVE": "<=",
-        }[op]
-        numeric = d.coalesce("integer_value", "float_value")
-        return f"{numeric} IS NOT NULL AND {numeric} {sql_op} {value}"
-    if op == "REGEX":
-        if not _regex_safe_for_re2(str(value)):
-            return None
-        pattern_lit = f"'{_q(str(value))}'"
-        return (
-            f"string_value IS NOT NULL AND {d.regexp_anchored_match('string_value', pattern_lit)}"
-        )
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Direct comparison: for non-trait references (JSONPath columns, env consts).
-# ---------------------------------------------------------------------------
-
-
-def _direct_comparison(
-    ctx: TranslateContext, op: str, expr: str, value: object, is_jsonpath: bool
+def _comparison(
+    ctx: TranslateContext, op: str, expr: str, value: object, is_jsonpath: bool = False
 ) -> str | None:
+    """Emit a SQL fragment comparing `expr` against `value` per `op`.
+
+    Used for both trait columns (VARIANT, cast as needed) and JSONPath
+    references (already-typed columns or string literals).
+    """
     if value is None:
         return None
     d = ctx.dialect
@@ -303,6 +244,14 @@ def _direct_comparison(
             "LESS_THAN_INCLUSIVE": "<=",
         }[op]
         return f"({expr} IS NOT NULL AND {d.cast_float(expr)} {sql_op} {value})"
+    if op == "MODULO":
+        try:
+            divisor, remainder = str(value).split("|")
+            float(divisor)
+            float(remainder)
+        except (ValueError, AttributeError):
+            return None
+        return f"({expr} IS NOT NULL AND ({d.mod(d.cast_number(expr), divisor)}) = {remainder})"
     if op == "REGEX":
         if not _regex_safe_for_re2(str(value)):
             return None
@@ -329,18 +278,15 @@ def translate_condition(cond: dict[str, Any], ctx: TranslateContext) -> str | No
             return None
         threshold = float(val) if val is not None else 0.0
         if not prop:
-            return _percentage_split_expr(
-                ctx, ctx.segment_key, ctx.dialect.cast_string(ctx.identity_key_col), threshold
-            )
-        if prop.startswith("$."):
+            value_expr = ctx.dialect.cast_string(ctx.identity_key_col)
+        elif prop.startswith("$."):
             jp = ctx.jsonpath_expr(prop)
             if jp is None:
                 return None
-            return _percentage_split_expr(
-                ctx, ctx.segment_key, ctx.dialect.cast_string(jp), threshold
-            )
-        body = _percentage_split_expr(ctx, ctx.segment_key, "string_value", threshold)
-        return _exists_for_trait(ctx, prop, body)
+            value_expr = ctx.dialect.cast_string(jp)
+        else:
+            value_expr = ctx.dialect.cast_string(ctx.trait_path(prop))
+        return _percentage_split_expr(ctx, ctx.segment_key, value_expr, threshold)
 
     if not prop:
         return None
@@ -354,13 +300,14 @@ def translate_condition(cond: dict[str, Any], ctx: TranslateContext) -> str | No
             return "TRUE"
         if op == "IS_NOT_SET":
             return "FALSE"
-        return _direct_comparison(ctx, op, path, val, is_jsonpath=True)
+        return _comparison(ctx, op, path, val, is_jsonpath=True)
 
-    # IS_SET / IS_NOT_SET → existence check on TRAITS.
+    # Trait-bound predicates → VARIANT path-extraction on i.traits:"<key>".
+    path = ctx.trait_path(prop)
     if op == "IS_SET":
-        return _exists_any_trait(ctx, prop, negate=False)
+        return f"{path} IS NOT NULL"
     if op == "IS_NOT_SET":
-        return _exists_any_trait(ctx, prop, negate=True)
+        return f"{path} IS NULL"
 
     # Semver-marked comparator (segment value ends with `:semver`).
     if isinstance(val, str) and val.endswith(":semver"):
@@ -383,18 +330,14 @@ def translate_condition(cond: dict[str, Any], ctx: TranslateContext) -> str | No
             "LESS_THAN_INCLUSIVE": "<=",
         }[op]
         bare_lit = f"'{_q(bare)}'"
-        body = (
-            f"string_value IS NOT NULL AND "
-            f"{_semver_sort_key_expr(ctx, 'string_value')} {sql_op} "
-            f"{_semver_sort_key_expr(ctx, bare_lit)}"
+        col_str = ctx.dialect.cast_string(path)
+        return (
+            f"({path} IS NOT NULL AND "
+            f"{_semver_sort_key_expr(ctx, col_str)} {sql_op} "
+            f"{_semver_sort_key_expr(ctx, bare_lit)})"
         )
-        return _exists_for_trait(ctx, prop, body)
 
-    # Standard trait-bound predicate → EXISTS subquery.
-    body_pred = _trait_predicate(ctx, op, val)
-    if body_pred is None:
-        return None
-    return _exists_for_trait(ctx, prop, body_pred)
+    return _comparison(ctx, op, path, val, is_jsonpath=False)
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ suite as a separate job.
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -21,15 +22,15 @@ from tests.conftest import load_test_cases, parity_env_key
 
 
 @pytest.fixture(scope="session")
-def loaded_cases(snowflake_session: Any, parity_tables: tuple[str, str]) -> Iterator[list[dict]]:
-    """Load every test case's identity + traits into the scratch tables under a
-    per-case unique env key. Returns the list of cases (with overridden
-    `environment.key` so engine and SQL agree on what env to filter by).
+def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[dict]]:
+    """Load every test case's identity into the scratch IDENTITIES table
+    with traits as a VARIANT (PARSE_JSON-encoded). Returns the list of
+    cases (with overridden `environment.key` so engine and SQL agree on
+    what env to filter by).
     """
     cases = load_test_cases()
     if not cases:
         pytest.skip("engine-test-data submodule not initialised")
-    identities_table, traits_table = parity_tables
     out: list[dict] = []
     for i, case in enumerate(cases):
         case = copy.deepcopy(case)
@@ -43,38 +44,18 @@ def loaded_cases(snowflake_session: Any, parity_tables: tuple[str, str]) -> Iter
         identifier = (ident.get("identifier") or "").replace("'", "''")
         identity_key = (ident.get("key") or "").replace("'", "''")
         identity_id = i + 1
-        snowflake_session.sql(
-            f"""
-            INSERT INTO {identities_table} (environment_id, id, identifier, identity_key)
-            SELECT '{env_id}', {identity_id}, '{identifier}', '{identity_key}'
-            """
-        ).collect()
         traits = ident.get("traits") or {}
         if traits:
-            rows: list[str] = []
-            for k, v in traits.items():
-                kq = k.replace("'", "''")
-                if isinstance(v, bool):
-                    rows.append(
-                        f"('{env_id}', {identity_id}, '{kq}', NULL, NULL, NULL, {str(v).upper()})"
-                    )
-                elif isinstance(v, int):
-                    rows.append(f"('{env_id}', {identity_id}, '{kq}', NULL, {v}, NULL, NULL)")
-                elif isinstance(v, float):
-                    rows.append(f"('{env_id}', {identity_id}, '{kq}', NULL, NULL, {v}, NULL)")
-                elif v is None:
-                    continue
-                else:
-                    sq = str(v).replace("'", "''")
-                    rows.append(f"('{env_id}', {identity_id}, '{kq}', '{sq}', NULL, NULL, NULL)")
-            if rows:
-                cols = (
-                    "environment_id, identity_id, trait_key, "
-                    "string_value, integer_value, float_value, boolean_value"
-                )
-                snowflake_session.sql(
-                    f"INSERT INTO {traits_table} ({cols}) VALUES {', '.join(rows)}"
-                ).collect()
+            traits_json = json.dumps(traits).replace("'", "''")
+            traits_lit = f"PARSE_JSON('{traits_json}')"
+        else:
+            traits_lit = "NULL"
+        snowflake_session.sql(
+            f"""
+            INSERT INTO {parity_table} (environment_id, id, identifier, identity_key, traits)
+            SELECT '{env_id}', {identity_id}, '{identifier}', '{identity_key}', {traits_lit}
+            """
+        ).collect()
         out.append(case)
     yield out
 
@@ -100,17 +81,16 @@ def test_segment_matches_engine(
     seg_key: str,
     snowflake_session: Any,
     loaded_cases: list[dict],
-    parity_tables: tuple[str, str],
+    parity_table: str,
 ) -> None:
     case = loaded_cases[case_idx]
-    identities_table, traits_table = parity_tables
     eval_ctx = case["context"]
     env: EnvironmentContext = eval_ctx["environment"]
     segment = eval_ctx["segments"][seg_key]
 
     engine_match = is_context_in_segment(eval_ctx, segment)
 
-    tr_ctx = TranslateContext(environment=env, traits_table=traits_table)
+    tr_ctx = TranslateContext(environment=env)
     sql = translate_segment(segment, tr_ctx)
     if sql is None:
         pytest.skip(f"segment uses untranslatable operator (case {case_idx} seg {seg_key})")
@@ -118,7 +98,7 @@ def test_segment_matches_engine(
     rows = snowflake_session.sql(
         f"""
         SELECT EXISTS(
-          SELECT 1 FROM {identities_table} i
+          SELECT 1 FROM {parity_table} i
           WHERE i.environment_id = '{env_id_lit}' AND ({sql})
         ) AS m
         """

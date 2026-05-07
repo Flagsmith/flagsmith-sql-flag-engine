@@ -4,12 +4,10 @@ Unit tests run anywhere; the parity suite needs a Snowflake account. The
 parity fixture skips automatically if `SNOWFLAKE_ACCOUNT` isn't set, so
 running `pytest` with no env vars only runs the unit tests.
 
-Each parity-test session creates a per-run pair of transient tables
-(`IDENTITIES_PARITY_<uuid>`, `TRAITS_PARITY_<uuid>`) so concurrent CI runs
-don't step on each other. Tables are dropped on teardown.
-
-`environment_id` columns are STRING — they hold `EnvironmentContext.key`
-values directly, matching the engine's vocabulary.
+Each parity-test session creates a per-run transient `IDENTITIES_PARITY_<uuid>`
+table so concurrent CI runs don't step on each other. Schema mirrors
+`SnowflakeDialect.SCHEMA_DDL`: 4 typed columns + a `traits` VARIANT.
+Table is dropped on teardown.
 """
 
 from __future__ import annotations
@@ -61,44 +59,28 @@ def snowflake_session() -> Iterator[Any]:
 
 
 @pytest.fixture(scope="session")
-def parity_tables(snowflake_session: Any) -> Iterator[tuple[str, str]]:
-    """Create a per-run pair of scratch tables matching the production schema
-    shape (string `environment_id`). Returns `(identities_table, traits_table)`
-    fully-qualified names.
-    """
+def parity_table(snowflake_session: Any) -> Iterator[str]:
+    """Create a per-run scratch IDENTITIES table mirroring
+    `SnowflakeDialect.SCHEMA_DDL`. Returns the fully-qualified name."""
     suffix = uuid.uuid4().hex[:8]
     db = os.environ.get("SNOWFLAKE_DATABASE", "FS_TEST")
     schema = os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC")
-    identities = f"{db}.{schema}.IDENTITIES_PARITY_{suffix}"
-    traits = f"{db}.{schema}.TRAITS_PARITY_{suffix}"
+    table = f"{db}.{schema}.IDENTITIES_PARITY_{suffix}"
     snowflake_session.sql(
         f"""
-        CREATE TRANSIENT TABLE {identities} (
-            environment_id STRING,
-            id NUMBER,
-            identifier STRING,
-            identity_key STRING
-        )
-        """
-    ).collect()
-    snowflake_session.sql(
-        f"""
-        CREATE TRANSIENT TABLE {traits} (
-            environment_id STRING,
-            identity_id NUMBER,
-            trait_key STRING,
-            string_value STRING,
-            integer_value NUMBER,
-            float_value FLOAT,
-            boolean_value BOOLEAN
+        CREATE TRANSIENT TABLE {table} (
+            environment_id STRING NOT NULL,
+            id NUMBER NOT NULL,
+            identifier STRING NOT NULL,
+            identity_key STRING NOT NULL,
+            traits VARIANT
         )
         """
     ).collect()
     try:
-        yield identities, traits
+        yield table
     finally:
-        snowflake_session.sql(f"DROP TABLE IF EXISTS {identities}").collect()
-        snowflake_session.sql(f"DROP TABLE IF EXISTS {traits}").collect()
+        snowflake_session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
 def load_test_cases() -> list[dict]:

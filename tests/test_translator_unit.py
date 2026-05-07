@@ -18,7 +18,7 @@ def _ctx(env_key: str = "test-env-key", env_name: str = "Test") -> TranslateCont
     return TranslateContext(environment=env)
 
 
-def test_simple_equal_emits_exists_against_traits() -> None:
+def test_simple_equal_emits_variant_path() -> None:
     seg = {
         "key": "1",
         "name": "s",
@@ -31,10 +31,9 @@ def test_simple_equal_emits_exists_against_traits() -> None:
     }
     sql = translate_segment(seg, _ctx())
     assert sql is not None
-    assert "EXISTS" in sql
-    assert "trait_key = 'plan'" in sql
-    assert "string_value = 'growth'" in sql
-    assert "environment_id = 'test-env-key'" in sql
+    # VARIANT path-extraction with quoted key, cast to STRING for comparison.
+    assert 'i.traits:"plan"' in sql
+    assert "::STRING = 'growth'" in sql
 
 
 def test_in_operator_translates_csv_value() -> None:
@@ -50,10 +49,11 @@ def test_in_operator_translates_csv_value() -> None:
     }
     sql = translate_segment(seg, _ctx())
     assert sql is not None
-    assert "string_value IN ('GB','US','DE')" in sql
+    assert 'i.traits:"country"' in sql
+    assert "IN ('GB','US','DE')" in sql
 
 
-def test_is_set_emits_exists_any_trait() -> None:
+def test_is_set_emits_is_not_null_on_path() -> None:
     seg = {
         "key": "3",
         "name": "s",
@@ -66,11 +66,11 @@ def test_is_set_emits_exists_any_trait() -> None:
     }
     sql = translate_segment(seg, _ctx())
     assert sql is not None
-    assert "EXISTS" in sql
-    assert "string_value" not in sql.split("trait_key = 'beta_cohort'")[1]
+    assert 'i.traits:"beta_cohort" IS NOT NULL' in sql
+    assert "EXISTS" not in sql  # no subquery, just path nullness
 
 
-def test_is_not_set_emits_not_exists() -> None:
+def test_is_not_set_emits_is_null_on_path() -> None:
     seg = {
         "key": "4",
         "name": "s",
@@ -83,7 +83,7 @@ def test_is_not_set_emits_not_exists() -> None:
     }
     sql = translate_segment(seg, _ctx())
     assert sql is not None
-    assert "NOT EXISTS" in sql
+    assert 'i.traits:"x" IS NULL' in sql
 
 
 def test_percentage_split_inlines_md5_arithmetic() -> None:
@@ -99,11 +99,28 @@ def test_percentage_split_inlines_md5_arithmetic() -> None:
     }
     sql = translate_segment(seg, _ctx())
     assert sql is not None
-    # No UDF call — pure inline SQL.
     assert "MD5_HEX" in sql
     assert "TO_NUMBER" in sql
     assert "<= 50.0" in sql
-    assert "percentage_split_sql" not in sql  # the SQL UDF wrapper
+
+
+def test_percentage_split_on_trait_uses_variant_path() -> None:
+    seg = {
+        "key": "101",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [
+                    {"operator": "PERCENTAGE_SPLIT", "property": "uuid_attr", "value": "30"}
+                ],
+            }
+        ],
+    }
+    sql = translate_segment(seg, _ctx())
+    assert sql is not None
+    assert 'i.traits:"uuid_attr"' in sql
+    assert "MD5_HEX" in sql
 
 
 def test_jsonpath_identity_identifier_uses_column_directly() -> None:
@@ -126,7 +143,7 @@ def test_jsonpath_identity_identifier_uses_column_directly() -> None:
     sql = translate_segment(seg, _ctx())
     assert sql is not None
     assert "i.identifier" in sql
-    assert "EXISTS" not in sql  # no traits lookup needed
+    assert "traits" not in sql  # no traits lookup needed
 
 
 def test_jsonpath_environment_name_uses_context_value() -> None:
@@ -204,3 +221,20 @@ def test_none_rule_emits_negation() -> None:
 def test_empty_rules_returns_false() -> None:
     seg = {"key": "9", "name": "s", "rules": []}
     assert translate_segment(seg, _ctx()) == "FALSE"
+
+
+def test_trait_with_special_characters_in_key_quoted() -> None:
+    """Trait keys can contain hyphens, dots, etc.; VARIANT path quotes them."""
+    seg = {
+        "key": "11",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [{"operator": "EQUAL", "property": "user-name", "value": "alice"}],
+            }
+        ],
+    }
+    sql = translate_segment(seg, _ctx())
+    assert sql is not None
+    assert 'i.traits:"user-name"' in sql
