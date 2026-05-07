@@ -61,9 +61,13 @@ class Dialect(Protocol):
 
     # --- regex ---
 
-    def regexp_anchored_match(self, value_expr: str, pattern_lit: str) -> str:
+    def regexp_anchored_match(self, value_expr: str, pattern: str) -> str:
         """Boolean: equivalent to Python `re.match(pattern, value)` —
-        anchored at position 0, may be a prefix of the value (not full-match)."""
+        anchored at position 0, may be a prefix of the value (not full-match).
+
+        `pattern` is the raw Python regex string; the dialect handles its
+        own escaping into a SQL literal (regex flavours differ in how
+        backslashes are treated)."""
         ...
 
     def regexp_nth_digit_run(self, value_expr: str, n: int) -> str:

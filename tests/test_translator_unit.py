@@ -15,7 +15,17 @@ from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
 
 
 def _ctx(env_key: str = "test-env-key", env_name: str = "Test") -> TranslateContext:
-    eval_ctx: EvaluationContext = {"environment": {"key": env_key, "name": env_name}}
+    eval_ctx: EvaluationContext = {
+        "environment": {"key": env_key, "name": env_name},
+        # Identity carries every trait keyed by representative segments below;
+        # PERCENTAGE_SPLIT bails when the prop isn't a known trait of the
+        # context identity, so make sure it is.
+        "identity": {
+            "identifier": "u",
+            "key": "k",
+            "traits": {"plan": "growth", "country": "GB", "uuid_attr": "abc"},
+        },
+    }
     return TranslateContext(evaluation_context=eval_ctx, dialect=SnowflakeDialect())
 
 
@@ -38,7 +48,7 @@ def test_translate_segment__equal_on_string_trait__emits_variant_path() -> None:
     # Then the predicate uses VARIANT path-extraction with quoted key, cast to STRING
     assert sql is not None
     assert 'i.traits:"plan"' in sql
-    assert "::STRING = 'growth'" in sql
+    assert "(i.traits:\"plan\")::STRING = 'growth'" in sql
 
 
 def test_translate_segment__in_with_csv_value__translates_to_in_clause() -> None:

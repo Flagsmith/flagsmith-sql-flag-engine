@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, TypedDict
 
+import json5
 import pytest
 from flag_engine.context.types import EvaluationContext
 from flag_engine.result.types import EvaluationResult
@@ -107,16 +108,26 @@ def parity_table(snowflake_session: Any) -> Iterator[str]:
         snowflake_session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
-def load_test_cases() -> list[EngineTestCase]:
-    """Load all engine-test-data cases. Returns empty list if the submodule
-    hasn't been initialised — the parity tests will skip in that case."""
+def _test_case_paths() -> list[Path]:
     if not ENGINE_TEST_DATA.exists():
         return []
-    cases: list[EngineTestCase] = []
-    for path in sorted(ENGINE_TEST_DATA.glob("*.json")):
-        with open(path) as f:
-            cases.append(json.load(f))
-    return cases
+    return sorted([*ENGINE_TEST_DATA.glob("*.json"), *ENGINE_TEST_DATA.glob("*.jsonc")])
+
+
+def load_test_cases() -> list[EngineTestCase]:
+    """Load all engine-test-data cases. Returns empty list if the submodule
+    hasn't been initialised — the parity tests will skip in that case.
+
+    Cases live as `.json` or `.jsonc`; `.jsonc` carries comments that
+    `json` rejects, so route everything through `json5.loads`, which is a
+    superset and handles both."""
+    return [json5.loads(p.read_text()) for p in _test_case_paths()]
+
+
+def case_filename_at(case_idx: int) -> str:
+    """Filename (no directory) for the test case at `case_idx`. Used by
+    the xfail list in `test_engine.py` to scope known-divergent cases."""
+    return _test_case_paths()[case_idx].name
 
 
 def parity_env_key(case_idx: int, original: str) -> str:
@@ -127,7 +138,10 @@ def parity_env_key(case_idx: int, original: str) -> str:
 
 
 def _q(s: str) -> str:
-    return s.replace("'", "''")
+    # Snowflake string literals process `\` as an escape, so JSON traits with
+    # `\uXXXX` or `\"` would lose their backslash before reaching PARSE_JSON.
+    # Double both backslashes and single quotes.
+    return s.replace("\\", "\\\\").replace("'", "''")
 
 
 @pytest.fixture(scope="session")

@@ -102,14 +102,26 @@ class SnowflakeDialect:
 
     # ----- regex -----
 
-    def regexp_anchored_match(self, value_expr: str, pattern_lit: str) -> str:
+    @staticmethod
+    def _regex_literal(pattern: str) -> str:
+        # Snowflake's regex flavour is POSIX-style: a single backslash in the
+        # SQL literal is treated as a literal backslash by both the SQL string
+        # parser AND the regex engine, so `'\d'` matches the character `d`,
+        # not a digit. To get a regex metachar (`\d`, `\s`, `\w`...) we need
+        # to double the backslash so the engine sees `\\d`. SQL single quotes
+        # are escaped by doubling per the SQL standard.
+        doubled = pattern.replace("\\", "\\\\").replace("'", "''")
+        return f"'{doubled}'"
+
+    def regexp_anchored_match(self, value_expr: str, pattern: str) -> str:
         # REGEXP_INSTR returns 1-indexed position of first match; = 1 means
         # the match starts at the beginning. Equivalent to re.match.
-        return f"REGEXP_INSTR({value_expr}, {pattern_lit}) = 1"
+        return f"REGEXP_INSTR({value_expr}, {self._regex_literal(pattern)}) = 1"
 
     def regexp_nth_digit_run(self, value_expr: str, n: int) -> str:
         # `\d+` finds runs of digits; 4th arg is 1-indexed occurrence number.
-        return f"REGEXP_SUBSTR({value_expr}, '\\\\d+', 1, {n})"
+        digit_run = self._regex_literal("\\d+")
+        return f"REGEXP_SUBSTR({value_expr}, {digit_run}, 1, {n})"
 
     # ----- hashing -----
 
@@ -126,10 +138,16 @@ class SnowflakeDialect:
         return f"({expr})::STRING"
 
     def cast_float(self, expr: str) -> str:
-        return f"({expr})::FLOAT"
+        # TRY_TO_DOUBLE/TRY_TO_NUMBER (rather than TRY_CAST) because
+        # they accept VARIANT directly, and a non-numeric variant value
+        # (e.g. a string trait used in a numeric comparison) yields NULL
+        # instead of erroring out the whole query. Engine behaviour for
+        # type-mismatched comparisons is "doesn't match", which NULL
+        # propagation through the predicate gives us.
+        return f"TRY_TO_DOUBLE(({expr})::STRING)"
 
     def cast_number(self, expr: str) -> str:
-        return f"({expr})::NUMBER"
+        return f"TRY_TO_NUMBER(({expr})::STRING)"
 
     # ----- composition -----
 

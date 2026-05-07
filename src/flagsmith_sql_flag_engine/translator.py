@@ -27,6 +27,7 @@ flag_engine for those segments, or surface an error at segment-edit time.
 
 from __future__ import annotations
 
+import json
 import re
 
 import jsonpath_rfc9535
@@ -204,6 +205,83 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _engine_in_values(value: object) -> list[str] | None:
+    """Mirror `flag_engine.segments.evaluator._get_in_values`: parse a segment
+    value into a list of candidate strings. Returns None for inputs the
+    engine doesn't accept (non-string, non-list)."""
+    if isinstance(value, list):
+        return [v if isinstance(v, str) else str(v) for v in value]
+    if not isinstance(value, str):
+        return None
+    if value.startswith("["):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return value.split(",")
+        if isinstance(parsed, list):
+            return [v if isinstance(v, str) else str(v) for v in parsed]
+    return value.split(",")
+
+
+def _trait_typed_eq(ctx: TranslateContext, path: str, value: object, negate: bool) -> str:
+    """Type-dispatched EQUAL/NOT_EQUAL on a VARIANT trait, mirroring engine
+    semantics: segment value is cast to the trait's runtime type before
+    comparison; cast failure → no match (False) for both ops.
+
+    Each branch is gated by `TYPEOF(...) = '...'` rather than wrapped in
+    a CASE statement; Snowflake's optimiser sometimes evaluates all CASE
+    arms eagerly (e.g. casting a VARCHAR variant to BOOLEAN even when
+    the BOOLEAN arm is unreachable for that row), and AND short-circuits
+    reliably."""
+    d = ctx.dialect
+    sql_op = "<>" if negate else "="
+    str_value = str(value)
+    str_lit = string_literal(str_value)
+    str_path = d.cast_string(path)
+    # Engine bool cast: `lambda v: v not in ("False", "false")`. Compare via
+    # the variant's lowercase string form so we never invoke `(...)::BOOLEAN`
+    # on a non-bool variant.
+    bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
+    bool_branch = f"({str_path}) {sql_op} {bool_str_lit}"
+    # Engine int/float cast: int(v) / float(v); ValueError → no match.
+    try:
+        int_lit: str | None = str(int(str_value))
+    except (ValueError, TypeError):
+        int_lit = None
+    try:
+        float_lit: str | None = repr(float(str_value))
+    except (ValueError, TypeError):
+        float_lit = None
+    no_match = "FALSE"  # engine returns False on cast failure for both EQUAL and NOT_EQUAL
+    int_branch = f"({path})::NUMBER {sql_op} {int_lit}" if int_lit is not None else no_match
+    float_branch = f"({path})::FLOAT {sql_op} {float_lit}" if float_lit is not None else no_match
+    return (
+        f"((TYPEOF({path}) = 'BOOLEAN' AND {bool_branch})"
+        f" OR (TYPEOF({path}) = 'INTEGER' AND {int_branch})"
+        f" OR (TYPEOF({path}) IN ('DECIMAL', 'DOUBLE') AND {float_branch})"
+        f" OR (TYPEOF({path}) NOT IN ('BOOLEAN', 'INTEGER', 'DECIMAL', 'DOUBLE')"
+        f" AND {str_path} {sql_op} {str_lit}))"
+    )
+
+
+def _trait_typed_in(ctx: TranslateContext, path: str, value: object) -> str | None:
+    """Type-dispatched IN on a VARIANT trait, mirroring engine semantics:
+    int trait stringifies and looks up against the parsed string set; string
+    trait does direct lookup; other types never match."""
+    items = _engine_in_values(value)
+    if items is None:
+        return None
+    item_lits = ",".join(string_literal(v) for v in items)
+    str_path = ctx.dialect.cast_string(path)
+    return (
+        f"(CASE TYPEOF({path})"
+        f" WHEN 'INTEGER' THEN {str_path} IN ({item_lits})"
+        f" WHEN 'VARCHAR' THEN {str_path} IN ({item_lits})"
+        f" ELSE FALSE"
+        f" END)"
+    )
+
+
 def _comparison(
     ctx: TranslateContext,
     op: str,
@@ -251,9 +329,10 @@ def _comparison(
         mod_expr = d.mod(d.cast_number(expr), divisor_lit)
         return f"({expr} IS NOT NULL AND ({mod_expr}) = {remainder_lit})"
     if op == "REGEX":
-        if not _regex_safe_for_re2(str(value)):
+        pattern = str(value)
+        if not _regex_safe_for_re2(pattern):
             return None
-        return f"({expr} IS NOT NULL AND {d.regexp_anchored_match(str_expr, lit)})"
+        return f"({expr} IS NOT NULL AND {d.regexp_anchored_match(str_expr, pattern)})"
     return None
 
 
@@ -278,14 +357,29 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         if threshold_lit is None:
             return None
         threshold = float(threshold_lit)
+        identity: dict[str, object] = ctx.evaluation_context.get("identity") or {}  # type: ignore[assignment]
         if not prop:
+            # Implicit `$.identity.key` — engine returns False when no
+            # identity, or when the identity lacks `key` (the engine never
+            # synthesises one from env+identifier).
+            if not identity.get("key"):
+                return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
         elif prop.startswith("$."):
+            # Identity-bound jsonpath against an absent value → engine
+            # treats the looked-up value as None and PERCENTAGE_SPLIT bails.
+            if prop == "$.identity.key" and not identity.get("key"):
+                return "FALSE"
+            if prop == "$.identity.identifier" and not identity.get("identifier"):
+                return "FALSE"
             jp = ctx.jsonpath_expr(prop)
             if jp is None:
                 return None
             value_expr = ctx.dialect.cast_string(jp)
         else:
+            traits = identity.get("traits") or {}
+            if not isinstance(traits, dict) or prop not in traits:
+                return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.trait_path(prop))
         return _percentage_split_expr(ctx, ctx.segment_key, value_expr, threshold)
 
@@ -337,6 +431,17 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             f"{_semver_sort_key_expr(ctx, col_str)} {sql_op} "
             f"{_semver_sort_key_expr(ctx, bare_lit)})"
         )
+
+    # Type-aware comparators on VARIANT traits — mirror flag_engine's
+    # per-type coercion of the segment value before compare.
+    if op in {"EQUAL", "NOT_EQUAL"} and val is not None:
+        negate = op == "NOT_EQUAL"
+        return f"({path} IS NOT NULL AND {_trait_typed_eq(ctx, path, val, negate=negate)})"
+    if op == "IN":
+        in_pred = _trait_typed_in(ctx, path, val)
+        if in_pred is None:
+            return None
+        return f"({path} IS NOT NULL AND {in_pred})"
 
     return _comparison(ctx, op, path, val, is_jsonpath=False)
 
