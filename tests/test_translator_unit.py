@@ -209,9 +209,10 @@ def test_translate_segment__jsonpath_environment_name__uses_context_value() -> N
     # When translated
     sql = translate_segment(seg, _ctx(env_name="Production"))
 
-    # Then the predicate emits a constant-vs-constant comparison from the context
-    assert sql is not None
-    assert "'Production' = 'Production'" in sql
+    # Then the predicate collapses to a SQL constant — the env name is fixed
+    # for every row in the resulting query, so the translator pre-computes
+    # the engine's verdict via `is_context_in_segment`.
+    assert sql == "((TRUE))"
 
 
 def test_translate_segment__regex_with_backreference__returns_none() -> None:
@@ -351,7 +352,7 @@ def test_translate_segment__numeric_comparator_with_numeric_string__interpolates
     assert "> 30.0" in sql or "> 30" in sql
 
 
-def test_translate_segment__modulo_with_injection_in_divisor__returns_none() -> None:
+def test_translate_segment__modulo_with_injection_in_divisor__compiles_to_false() -> None:
     # Given a MODULO condition whose divisor contains a SQL-injection payload
     seg = {
         "key": "14",
@@ -370,6 +371,10 @@ def test_translate_segment__modulo_with_injection_in_divisor__returns_none() -> 
         ],
     }
 
-    # When translation is attempted
-    # Then the translator declines (float() on the divisor raises before SQL is built)
-    assert translate_segment(seg, _ctx()) is None
+    # When translated
+    sql = translate_segment(seg, _ctx())
+
+    # Then the bad operand collapses to FALSE (matching engine behaviour:
+    # float() on the divisor raises and the engine returns False), with
+    # zero injection-payload bytes ever reaching the SQL output
+    assert sql == "((FALSE))"

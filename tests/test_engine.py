@@ -57,10 +57,14 @@ def test_translate_segment__engine_test_data_case__matches_engine(
     eval_ctx = case["context"]
     segment = eval_ctx["segments"][seg_key]
     sql_match = parity_results[(case_idx, seg_key)]
-    if sql_match is None:
-        pytest.skip(f"segment uses untranslatable operator (case {case_idx} seg {seg_key})")
-    if case_filename_at(case_idx) in XFAIL_CASE_FILENAMES:
-        pytest.xfail(f"known divergence: {case_filename_at(case_idx)}")
+    filename = case_filename_at(case_idx)
+    if filename in XFAIL_CASE_FILENAMES:
+        pytest.xfail(f"known divergence: {filename}")
+    # `sql_match is None` means translate_segment couldn't compile the
+    # segment to SQL (an unsupported operator, or a regex with backref/
+    # lookaround). No engine-test-data case hits that today; if you add a
+    # new case that does, list it in XFAIL_CASE_FILENAMES with a why.
+    assert sql_match is not None, f"segment {seg_key} of {filename} compiled to None"
 
     # When the engine evaluates the same (context, segment) in-memory
     engine_match = is_context_in_segment(eval_ctx, segment)

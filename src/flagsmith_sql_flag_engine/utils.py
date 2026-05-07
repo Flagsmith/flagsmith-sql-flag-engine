@@ -21,8 +21,6 @@ SQL-engine syntax (VARIANT path quoting, JSONB extraction, casts) lives on
 the `Dialect` protocol instead.
 """
 
-from __future__ import annotations
-
 
 def escape_string(value: str) -> str:
     """Double single quotes for inclusion inside a SQL string literal.

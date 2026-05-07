@@ -37,6 +37,7 @@ from flag_engine.context.types import (
     SegmentContext,
     SegmentRule,
 )
+from flag_engine.segments.evaluator import is_context_in_segment
 
 from flagsmith_sql_flag_engine.dialect import Dialect
 from flagsmith_sql_flag_engine.utils import (
@@ -205,6 +206,26 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _engine_static_verdict(ctx: TranslateContext, cond: SegmentCondition) -> str:
+    """Run a single condition through `is_context_in_segment` against the
+    eval context and emit `'TRUE'`/`'FALSE'`. Used for JSONPath conditions
+    that don't reference row-bound state — the verdict is the same for
+    every row in the resulting query, so we collapse it now."""
+    fake_segment: SegmentContext = {
+        "key": ctx.segment_key or "_static",
+        "name": "_static",
+        "rules": [{"type": "ALL", "conditions": [cond]}],
+    }
+    try:
+        matches = is_context_in_segment(ctx.evaluation_context, fake_segment)
+    except Exception:
+        # Engine catches almost everything internally; if anything escapes
+        # (mismatched type, unknown operator), default to "no match" so
+        # the surrounding rule composition still produces sensible SQL.
+        return "FALSE"
+    return "TRUE" if matches else "FALSE"
+
+
 def _engine_in_values(value: object) -> list[str] | None:
     """Mirror `flag_engine.segments.evaluator._get_in_values`: parse a segment
     value into a list of candidate strings. Returns None for inputs the
@@ -324,7 +345,9 @@ def _comparison(
     if op == "MODULO":
         parsed = modulo_literal(value)
         if parsed is None:
-            return None
+            # Bad operand (`""`, `"invalid|value"`, etc.) — engine catches
+            # the cast error and returns False.
+            return "FALSE"
         divisor_lit, remainder_lit = parsed
         mod_expr = d.mod(d.cast_number(expr), divisor_lit)
         return f"({expr} IS NOT NULL AND ({mod_expr}) = {remainder_lit})"
@@ -386,8 +409,19 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     if not prop:
         return None
 
-    # JSONPath properties → direct column / env-constant comparison.
-    if prop.startswith("$."):
+    # JSONPath properties: row-bound identity columns stay as column refs;
+    # everything else resolves against the eval context (constant for every
+    # row in the query) and gets pre-computed via the engine. Properties
+    # that start with `$.` but don't parse as JSONPath fall back to a trait
+    # lookup with `prop` used verbatim as the key — same as the engine.
+    if prop.startswith("$.") and prop not in ("$.identity.identifier", "$.identity.key"):
+        try:
+            jsonpath_rfc9535.compile(prop)
+        except jsonpath_rfc9535.JSONPathSyntaxError:
+            pass  # treat as trait key — fall through to trait branch
+        else:
+            return _engine_static_verdict(ctx, cond)
+    elif prop.startswith("$."):
         path = ctx.jsonpath_expr(prop)
         if path is None:
             return None
