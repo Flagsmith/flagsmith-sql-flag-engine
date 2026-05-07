@@ -1,7 +1,7 @@
 [project]
 name = "flagsmith-sql-flag-engine"
 version = "0.1.0"
-description = "SQL translator for Flagsmith segment predicates. Sibling to flagsmith-flag-engine (Python) and flagsmith-rust-flag-engine (Rust); produces SQL strings instead of evaluating directly."
+description = "SQL translator for Flagsmith segment predicates."
 readme = "README.md"
 authors = [{ name = "Flagsmith", email = "engineering@flagsmith.com" }]
 requires-python = ">=3.10"
