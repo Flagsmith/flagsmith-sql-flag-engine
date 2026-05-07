@@ -129,25 +129,14 @@ class TranslateContext:
         return self.dialect.trait_path(self.identities_alias, trait_key)
 
     def jsonpath_expr(self, prop: str) -> str | None:
-        # Identity properties are bound to the IDENTITIES row at execution
-        # time, so they translate to column references rather than literals.
+        # Only the row-bound identity columns need an SQL expression — every
+        # other JSONPath property is resolved against the eval context up in
+        # `translate_condition` via `_engine_static_verdict`.
         if prop == "$.identity.identifier":
             return self.dialect.identifier_expr(self.identities_alias)
         if prop == "$.identity.key":
             return self.dialect.identity_key_expr(self.identities_alias)
-        # Everything else is resolved against the eval context now and
-        # baked into the generated SQL as a literal.
-        try:
-            compiled = jsonpath_rfc9535.compile(prop)
-        except jsonpath_rfc9535.JSONPathSyntaxError:
-            return None
-        result = compiled.find_one(dict(self.evaluation_context))
-        if result is None or result.value is None:
-            return None
-        value = result.value
-        if not isinstance(value, (str, int, float, bool)):
-            return None
-        return string_literal(str(value))
+        return None
 
     def with_segment_key(self, key: str) -> TranslateContext:
         return TranslateContext(
@@ -218,10 +207,10 @@ def _engine_static_verdict(ctx: TranslateContext, cond: SegmentCondition) -> str
     }
     try:
         matches = is_context_in_segment(ctx.evaluation_context, fake_segment)
-    except Exception:
-        # Engine catches almost everything internally; if anything escapes
-        # (mismatched type, unknown operator), default to "no match" so
-        # the surrounding rule composition still produces sensible SQL.
+    except Exception:  # pragma: no cover - defensive: engine catches its own errors
+        # If anything escapes the engine (mismatched type, unknown operator),
+        # default to "no match" so the surrounding rule composition still
+        # produces sensible SQL.
         return "FALSE"
     return "TRUE" if matches else "FALSE"
 
@@ -239,7 +228,7 @@ def _engine_in_values(value: object) -> list[str] | None:
             parsed = json.loads(value)
         except (ValueError, TypeError):
             return value.split(",")
-        if isinstance(parsed, list):
+        if isinstance(parsed, list):  # pragma: no branch - `[`-prefixed valid JSON parses as a list
             return [v if isinstance(v, str) else str(v) for v in parsed]
     return value.split(",")
 
@@ -381,7 +370,7 @@ def _comparison(
         if not _regex_safe_for_re2(pattern):
             return None
         return f"({expr} IS NOT NULL AND {d.regexp_anchored_match(str_expr, pattern)})"
-    return None
+    return None  # pragma: no cover - all TRANSLATABLE_OPERATORS handled above
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +437,9 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             return _engine_static_verdict(ctx, cond)
     elif prop.startswith("$."):
         path = ctx.jsonpath_expr(prop)
-        if path is None:
+        if (
+            path is None
+        ):  # pragma: no cover - elif reaches here only for identity cols, which always resolve
             return None
         if op == "IS_SET":
             return "TRUE"

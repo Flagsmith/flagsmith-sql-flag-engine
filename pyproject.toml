@@ -27,6 +27,7 @@ dev = [
     "prek>=0.3",
     "snowflake-snowpark-python>=1.20",
     "json5>=0.14.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [build-system]
@@ -34,11 +35,21 @@ requires = ["uv_build>=0.8.14,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = [
+    "-ra",
+    "--cov", "src",
+    "--cov", "tests",
+    "--cov-report", "term-missing",
+    "--cov-report", "xml",
+]
 testpaths = ["tests"]
 markers = [
     "parity: tests that hit Snowflake (skipped if SNOWFLAKE_* env vars are unset)",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["src", "tests"]
 
 [tool.ruff]
 target-version = "py310"

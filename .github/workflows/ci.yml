@@ -33,3 +33,9 @@ jobs:
           umask 077
           printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > /tmp/snowflake_pk.p8
       - run: make test
+      - name: Check Coverage
+        uses: 5monkeys/cobertura-action@v14
+        with:
+          minimum_coverage: 100
+          fail_below_threshold: true
+          show_missing: true

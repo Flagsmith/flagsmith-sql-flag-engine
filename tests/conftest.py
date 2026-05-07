@@ -57,7 +57,7 @@ def _snowflake_creds_present() -> bool:
 @pytest.fixture(scope="session")
 def snowflake_session() -> Iterator[Any]:
     """Snowpark session keyed off SNOWFLAKE_* env vars. Session-scoped."""
-    if not _snowflake_creds_present():
+    if not _snowflake_creds_present():  # pragma: no cover - env-dependent skip
         pytest.skip("SNOWFLAKE_ACCOUNT / SNOWFLAKE_USER not set")
     from snowflake.snowpark import Session
 
@@ -71,9 +71,9 @@ def snowflake_session() -> Iterator[Any]:
     }
     if pk_path := os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH"):
         config["private_key_file"] = pk_path
-    elif password := os.environ.get("SNOWFLAKE_PASSWORD"):
+    elif password := os.environ.get("SNOWFLAKE_PASSWORD"):  # pragma: no cover - alt auth path
         config["password"] = password
-    else:
+    else:  # pragma: no cover - env-dependent skip
         pytest.skip("no SNOWFLAKE_PRIVATE_KEY_PATH or SNOWFLAKE_PASSWORD")
 
     sess = Session.builder.configs(config).create()
@@ -109,7 +109,7 @@ def parity_table(snowflake_session: Any) -> Iterator[str]:
 
 
 def _test_case_paths() -> list[Path]:
-    if not ENGINE_TEST_DATA.exists():
+    if not ENGINE_TEST_DATA.exists():  # pragma: no cover - submodule-not-checked-out fallback
         return []
     return sorted([*ENGINE_TEST_DATA.glob("*.json"), *ENGINE_TEST_DATA.glob("*.jsonc")])
 
@@ -152,7 +152,7 @@ def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[Eng
     filter by). One Snowflake round-trip for all 102 cases.
     """
     cases = load_test_cases()
-    if not cases:
+    if not cases:  # pragma: no cover - submodule-not-checked-out fallback
         pytest.skip("engine-test-data submodule not initialised")
     overridden: list[EngineTestCase] = []
     selects: list[str] = []
@@ -208,7 +208,7 @@ def parity_results(
             pairs.append((case_idx, seg_key, sql, env_key))
 
     for i, (_case_idx, _seg_key, sql, env_key) in enumerate(pairs):
-        if sql is None:
+        if sql is None:  # pragma: no cover - every case in the dataset compiles today
             continue
         env_lit = _q(env_key)
         select_clauses.append(
@@ -218,7 +218,7 @@ def parity_results(
         )
 
     results: dict[tuple[int, str], bool | None] = {}
-    if select_clauses:
+    if select_clauses:  # pragma: no branch - dataset always yields at least one clause
         rows = snowflake_session.sql("\nUNION ALL\n".join(select_clauses)).collect()
         for row in rows:
             i = int(row["PAIR_ID"])
@@ -226,6 +226,6 @@ def parity_results(
             results[(case_idx, seg_key)] = bool(row["M"])
     # Fill in untranslatable pairs as None so test parametrisation can skip.
     for case_idx, seg_key, sql, _env in pairs:
-        if sql is None:
+        if sql is None:  # pragma: no cover - every case in the dataset compiles today
             results[(case_idx, seg_key)] = None
     return results
