@@ -24,7 +24,3 @@ repos:
         require_serial: true
         pass_filenames: false
         types: [python]
-
-ci:
-  skip: [python-typecheck, uv-lock]
-  autoupdate_commit_msg: "ci: pre-commit autoupdate"

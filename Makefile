@@ -4,14 +4,14 @@ install-packages: ## Install all required packages
 
 .PHONY: install-pre-commit
 install-pre-commit: ## Install pre-commit hooks
-	uv run pre-commit install
+	uv run prek install
 
 .PHONY: install
 install: install-packages install-pre-commit ## Ensure the environment is set up
 
 .PHONY: lint
 lint: ## Run linters (pre-commit hooks across the tree)
-	uv run pre-commit run --all-files
+	uv run prek run --all-files
 
 .PHONY: test
 test: ## Run unit tests. Override scope with opts, e.g. `make test opts='-m parity'`
