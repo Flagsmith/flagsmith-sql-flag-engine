@@ -93,10 +93,8 @@ _HASH_CONST_LOW = 6835  # 16^8 mod 9999
 class TranslateContext:
     """Inputs the translator needs to produce a query for a specific shape.
 
-    `evaluation_context` — flag_engine `EvaluationContext` TypedDict. The
-                        `identity` key is `NotRequired`; this layer only
-                        depends on the non-identity portion (environment,
-                        feature, etc.) since identity values come from
+    `evaluation_context` — flag_engine `EvaluationContext` TypedDict.
+                        `context.identity` ignored since identity values come from
                         each `IDENTITIES` row at SQL execution time.
     `dialect`         — required implementation of the `Dialect` protocol.
                         The dialect owns the IDENTITIES schema, so column
@@ -119,11 +117,6 @@ class TranslateContext:
         self.dialect = dialect
         self.identities_alias = identities_alias
         self.segment_key = segment_key
-
-    @property
-    def env_id_lit(self) -> str:
-        """SQL string literal for the environment id (= EnvironmentContext.key)."""
-        return string_literal(self.evaluation_context["environment"]["key"])
 
     @property
     def identity_key_expr(self) -> str:

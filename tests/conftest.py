@@ -27,12 +27,23 @@ import os
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
+from flag_engine.context.types import EvaluationContext
+from flag_engine.result.types import EvaluationResult
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
+
+
+class EngineTestCase(TypedDict):
+    """An engine-test-data fixture file. The `result` field (engine-evaluated
+    flag values) is carried through but unused by the parity suite."""
+
+    context: EvaluationContext
+    result: EvaluationResult
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
@@ -96,12 +107,12 @@ def parity_table(snowflake_session: Any) -> Iterator[str]:
         snowflake_session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
-def load_test_cases() -> list[dict]:
+def load_test_cases() -> list[EngineTestCase]:
     """Load all engine-test-data cases. Returns empty list if the submodule
     hasn't been initialised — the parity tests will skip in that case."""
     if not ENGINE_TEST_DATA.exists():
         return []
-    cases: list[dict] = []
+    cases: list[EngineTestCase] = []
     for path in sorted(ENGINE_TEST_DATA.glob("*.json")):
         with open(path) as f:
             cases.append(json.load(f))
@@ -120,7 +131,7 @@ def _q(s: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[dict]]:
+def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[EngineTestCase]]:
     """Load every test case's identity into the scratch IDENTITIES table
     in a single multi-row INSERT. Returns the list of cases (with
     overridden `environment.key` so engine and SQL agree on what env to
@@ -129,12 +140,12 @@ def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[dic
     cases = load_test_cases()
     if not cases:
         pytest.skip("engine-test-data submodule not initialised")
-    overridden: list[dict] = []
+    overridden: list[EngineTestCase] = []
     selects: list[str] = []
     for i, case in enumerate(cases):
         case = copy.deepcopy(case)
         ctx = case["context"]
-        env = ctx.get("environment") or {}
+        env = ctx["environment"]
         env["key"] = parity_env_key(i, env.get("key", ""))
         env_id = _q(env["key"])
 
@@ -163,7 +174,7 @@ def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[dic
 def parity_results(
     snowflake_session: Any,
     parity_table: str,
-    loaded_cases: list[dict],
+    loaded_cases: list[EngineTestCase],
 ) -> dict[tuple[int, str], bool | None]:
     """Run every (case, segment) pair's translated SQL in one mega-query
     and return a `(case_idx, seg_key) -> bool | None` dict. `None` means

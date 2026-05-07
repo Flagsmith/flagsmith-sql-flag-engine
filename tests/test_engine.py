@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 from flag_engine.segments.evaluator import is_context_in_segment
 
-from tests.conftest import load_test_cases
+from tests.conftest import EngineTestCase, load_test_cases
 
 
 def _all_case_segments() -> list[tuple[int, str]]:
@@ -24,7 +24,7 @@ def _all_case_segments() -> list[tuple[int, str]]:
     cases = load_test_cases()
     out: list[tuple[int, str]] = []
     for i, case in enumerate(cases):
-        for seg_key in case.get("context", {}).get("segments") or {}:
+        for seg_key in case["context"].get("segments") or {}:
             out.append((i, seg_key))
     return out
 
@@ -38,7 +38,7 @@ def _all_case_segments() -> list[tuple[int, str]]:
 def test_translate_segment__engine_test_data_case__matches_engine(
     case_idx: int,
     seg_key: str,
-    loaded_cases: list[dict],
+    loaded_cases: list[EngineTestCase],
     parity_results: dict[tuple[int, str], bool | None],
 ) -> None:
     # Given a (case, segment) pair from engine-test-data and the pre-computed
