@@ -38,6 +38,7 @@ from flag_engine.context.types import (
 
 from flagsmith_sql_flag_engine.dialect import Dialect
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
+from flagsmith_sql_flag_engine.sanitiser import Sanitiser
 
 TRANSLATABLE_OPERATORS: frozenset[str] = frozenset(
     {
@@ -68,22 +69,6 @@ _RE2_UNSAFE = re.compile(
 
 def _regex_safe_for_re2(pattern: str) -> bool:
     return _RE2_UNSAFE.search(pattern) is None
-
-
-def _q(s: str) -> str:
-    """SQL-escape a single-quoted string literal."""
-    return s.replace("'", "''")
-
-
-def _quote_variant_key(name: str) -> str:
-    """Double-quote a key for VARIANT path-extraction (`v:"key"`).
-
-    Trait keys come from user-provided segment definitions and may contain
-    characters that need quoting (hyphens, dots, etc.). Snowflake's VARIANT
-    path syntax accepts double-quoted keys with arbitrary Unicode; embedded
-    double quotes get doubled per the SQL standard.
-    """
-    return '"' + name.replace('"', '""') + '"'
 
 
 # Constants for chunked MD5-mod-9999 hash. The engine computes
@@ -139,11 +124,11 @@ class TranslateContext:
     @property
     def env_id_lit(self) -> str:
         """SQL string literal for the environment id (= EnvironmentContext.key)."""
-        return f"'{_q(self.environment['key'])}'"
+        return Sanitiser.string_literal(self.environment["key"])
 
     def trait_path(self, trait_key: str) -> str:
         """VARIANT path-extraction for a trait: `i.traits:"<key>"`."""
-        return f"{self.traits_col}:{_quote_variant_key(trait_key)}"
+        return f"{self.traits_col}:{Sanitiser.variant_path_key(trait_key)}"
 
     def jsonpath_expr(self, prop: str) -> str | None:
         if prop == "$.identity.identifier":
@@ -151,7 +136,7 @@ class TranslateContext:
         if prop == "$.identity.key":
             return self.identity_key_col
         if prop == "$.environment.name":
-            return f"'{_q(self.environment['name'])}'"
+            return Sanitiser.string_literal(self.environment["name"])
         if prop == "$.environment.key":
             return self.env_id_lit
         return None
@@ -184,7 +169,7 @@ def _percentage_split_expr(
     recurses with doubled input; we skip).
     """
     d = ctx.dialect
-    seg_lit = f"'{_q(seg_key)}'"
+    seg_lit = Sanitiser.string_literal(seg_key)
     hash_subject = f"{seg_lit} || ',' || ({ctx_value_sql})"
     h = d.md5_hex(hash_subject)
     s1 = d.parse_hex_chunk(h, 1)
@@ -231,27 +216,22 @@ def _comparison(
     if value is None:
         return None
     d = ctx.dialect
-    lit = f"'{_q(str(value))}'"
+    lit = Sanitiser.string_literal(str(value))
     str_expr = expr if is_jsonpath else d.cast_string(expr)
     if op == "EQUAL":
         return f"{str_expr} = {lit}"
     if op == "NOT_EQUAL":
         return f"{str_expr} <> {lit}"
     if op == "IN":
-        items = "','".join(_q(v.strip()) for v in str(value).split(","))
+        items = "','".join(Sanitiser.escape_string(v.strip()) for v in str(value).split(","))
         return f"{str_expr} IN ('{items}')"
     if op == "CONTAINS":
         return d.position(lit, str_expr)
     if op == "NOT_CONTAINS":
         return f"({expr} IS NOT NULL AND NOT ({d.position(lit, str_expr)}))"
     if op in {"GREATER_THAN", "LESS_THAN", "GREATER_THAN_INCLUSIVE", "LESS_THAN_INCLUSIVE"}:
-        # Validate as numeric BEFORE interpolating — segment values come from
-        # `MANAGE_SEGMENTS`-permissioned users, who shouldn't be able to inject
-        # SQL via a comparator value. ValueError → untranslatable, caller
-        # falls back to the engine UDF or surfaces an error upstream.
-        try:
-            numeric_value = float(str(value))
-        except (TypeError, ValueError):
+        numeric_lit = Sanitiser.numeric_literal(value)
+        if numeric_lit is None:
             return None
         sql_op = {
             "GREATER_THAN": ">",
@@ -259,18 +239,14 @@ def _comparison(
             "GREATER_THAN_INCLUSIVE": ">=",
             "LESS_THAN_INCLUSIVE": "<=",
         }[op]
-        return f"({expr} IS NOT NULL AND {d.cast_float(expr)} {sql_op} {numeric_value})"
+        return f"({expr} IS NOT NULL AND {d.cast_float(expr)} {sql_op} {numeric_lit})"
     if op == "MODULO":
-        # Same validation discipline: divisor/remainder must parse as numbers.
-        try:
-            divisor_str, remainder_str = str(value).split("|")
-            divisor = float(divisor_str)
-            remainder = float(remainder_str)
-        except (ValueError, AttributeError):
+        parsed = Sanitiser.modulo_literal(value)
+        if parsed is None:
             return None
-        return (
-            f"({expr} IS NOT NULL AND ({d.mod(d.cast_number(expr), str(divisor))}) = {remainder})"
-        )
+        divisor_lit, remainder_lit = parsed
+        mod_expr = d.mod(d.cast_number(expr), divisor_lit)
+        return f"({expr} IS NOT NULL AND ({mod_expr}) = {remainder_lit})"
     if op == "REGEX":
         if not _regex_safe_for_re2(str(value)):
             return None
@@ -295,10 +271,10 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     if op == "PERCENTAGE_SPLIT":
         if not ctx.segment_key:
             return None
-        try:
-            threshold = float(str(val)) if val is not None else 0.0
-        except (TypeError, ValueError):
+        threshold_lit = Sanitiser.numeric_literal(val)
+        if threshold_lit is None:
             return None
+        threshold = float(threshold_lit)
         if not prop:
             value_expr = ctx.dialect.cast_string(ctx.identity_key_col)
         elif prop.startswith("$."):
@@ -351,7 +327,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             "GREATER_THAN_INCLUSIVE": ">=",
             "LESS_THAN_INCLUSIVE": "<=",
         }[op]
-        bare_lit = f"'{_q(bare)}'"
+        bare_lit = Sanitiser.string_literal(bare)
         col_str = ctx.dialect.cast_string(path)
         return (
             f"({path} IS NOT NULL AND "
