@@ -6,27 +6,12 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Lint + typecheck + unit tests
+  ci:
+    name: CI
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-      - run: make lint
-      - run: make typecheck
-      - run: make test opts="-m 'not parity'"
-
-  parity:
-    name: Engine parity (Snowflake)
-    runs-on: ubuntu-latest
-    # Skip parity on forked-PR runs — secrets aren't available there.
-    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
-    needs: test
     env:
+      # Parity tests skip cleanly when secrets are unavailable (forked PRs):
+      # the conftest fixture short-circuits on missing SNOWFLAKE_ACCOUNT.
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
       SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
@@ -41,8 +26,10 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+      - run: make lint
+      - run: make typecheck
       - name: Write Snowflake key file
         run: |
           umask 077
           printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > /tmp/snowflake_pk.p8
-      - run: make test opts="-m parity -n auto"
+      - run: make test opts="-n auto"
