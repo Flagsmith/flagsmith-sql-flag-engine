@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 from flag_engine.segments.evaluator import is_context_in_segment
 
-from tests.conftest import EngineTestCase, case_filename_at, load_test_cases
+from tests.conftest import TEST_CASES, EngineTestCase, case_filename_at
 
 # Cases the SQL translator can't match the engine on; tagged xfail so a
 # regression elsewhere doesn't get masked. If you're adding to this list,
@@ -38,9 +38,8 @@ XFAIL_CASE_FILENAMES = {
 
 def _all_case_segments() -> list[tuple[int, str]]:
     """Flatten cases × segments for parametrisation. Read at collection time."""
-    cases = load_test_cases()
     out: list[tuple[int, str]] = []
-    for i, case in enumerate(cases):
+    for i, case in enumerate(TEST_CASES):
         for seg_key in case["context"].get("segments") or {}:
             out.append((i, seg_key))
     return out
@@ -55,7 +54,7 @@ def _all_case_segments() -> list[tuple[int, str]]:
 def test_translate_segment__engine_test_data_case__matches_engine(
     case_idx: int,
     seg_key: str,
-    loaded_cases: list[EngineTestCase],
+    snowflake_identities: list[EngineTestCase],
     parity_results: dict[tuple[int, str], bool],
 ) -> None:
     # Given a (case, segment) pair from engine-test-data and the pre-computed
@@ -63,7 +62,7 @@ def test_translate_segment__engine_test_data_case__matches_engine(
     filename = case_filename_at(case_idx)
     if filename in XFAIL_CASE_FILENAMES:
         pytest.xfail(f"known divergence: {filename}")
-    case = loaded_cases[case_idx]
+    case = snowflake_identities[case_idx]
     eval_ctx = case["context"]
     segment = eval_ctx["segments"][seg_key]
     sql_match = parity_results[(case_idx, seg_key)]

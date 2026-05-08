@@ -27,16 +27,17 @@ import os
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TypedDict
 
 import json5
 import pytest
-from flag_engine.context.types import EvaluationContext
+from flag_engine.context.types import EvaluationContext, IdentityContext
 from flag_engine.result.types import EvaluationResult
 from snowflake.snowpark import Session
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
+from flagsmith_sql_flag_engine.utils import escape_string
 
 
 class EngineTestCase(TypedDict):
@@ -49,6 +50,16 @@ class EngineTestCase(TypedDict):
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
+TEST_CASE_PATHS: list[Path] = sorted(
+    [*ENGINE_TEST_DATA.glob("*.json"), *ENGINE_TEST_DATA.glob("*.jsonc")]
+)
+TEST_CASES: list[EngineTestCase] = [json5.loads(p.read_text()) for p in TEST_CASE_PATHS]
+
+
+def case_filename_at(case_idx: int) -> str:
+    """Filename of the engine-test-data case at `case_idx` (matches the
+    indexing of `TEST_CASES`). Used by the xfail list in `test_engine.py`."""
+    return TEST_CASE_PATHS[case_idx].name
 
 
 @pytest.fixture(scope="session")
@@ -71,7 +82,7 @@ def snowflake_session() -> Iterator[Session]:
 
 
 @pytest.fixture(scope="session")
-def snowflake_identity_table(snowflake_session: Session) -> Iterator[str]:
+def snowflake_identity_table(snowflake_session: Session) -> str:
     """A scratch IDENTITIES table mirroring
     `SnowflakeDialect.SCHEMA_DDL`. Returns the fully-qualified name."""
     suffix = uuid.uuid4().hex[:8]
@@ -89,90 +100,71 @@ def snowflake_identity_table(snowflake_session: Session) -> Iterator[str]:
         )
         """
     ).collect()
-    try:
-        yield table
-    finally:
-        snowflake_session.sql(f"DROP TABLE IF EXISTS {table}").collect()
-
-
-def _test_case_paths() -> list[Path]:
-    return sorted([*ENGINE_TEST_DATA.glob("*.json"), *ENGINE_TEST_DATA.glob("*.jsonc")])
-
-
-def load_test_cases() -> list[EngineTestCase]:
-    """Load all engine-test-data cases. Returns empty list if the submodule
-    hasn't been initialised — the parity tests will skip in that case.
-
-    Cases live as `.json` or `.jsonc`; `.jsonc` carries comments that
-    `json` rejects, so route everything through `json5.loads`, which is a
-    superset and handles both."""
-    return [json5.loads(p.read_text()) for p in _test_case_paths()]
-
-
-def case_filename_at(case_idx: int) -> str:
-    """Filename (no directory) for the test case at `case_idx`. Used by
-    the xfail list in `test_engine.py` to scope known-divergent cases."""
-    return _test_case_paths()[case_idx].name
-
-
-def parity_env_key(case_idx: int, original: str) -> str:
-    """Per-case unique env key. Prefixed with `parity-{idx}` so concurrent
-    cases (or cases that share an `environment.key` in the source data)
-    don't see each other's identities."""
-    return f"parity-{case_idx}-{original}"
+    return table
 
 
 def _q(s: str) -> str:
     # Snowflake string literals process `\` as an escape, so JSON traits with
     # `\uXXXX` or `\"` would lose their backslash before reaching PARSE_JSON.
-    # Double both backslashes and single quotes.
-    return s.replace("\\", "\\\\").replace("'", "''")
+    # Double the backslashes here; the single-quote doubling is the SQL-
+    # standard escape that `escape_string` already handles.
+    return escape_string(s.replace("\\", "\\\\"))
 
 
 @pytest.fixture(scope="session")
-def loaded_cases(snowflake_session: Any, snowflake_identity_table: str) -> Iterator[list[EngineTestCase]]:
-    """Load every test case's identity into the scratch IDENTITIES table
-    in a single multi-row INSERT. Returns the list of cases (with
-    overridden `environment.key` so engine and SQL agree on what env to
-    filter by). One Snowflake round-trip for all 102 cases.
+def snowflake_identities(
+    snowflake_session: Session,
+    snowflake_identity_table: str,
+) -> list[EngineTestCase]:
+    """Load every test case's identity in a single multi-row INSERT.
+
+    Returns the list of cases with environment keys modified for uniqueness.
     """
-    cases = load_test_cases()
     overridden: list[EngineTestCase] = []
     selects: list[str] = []
-    for i, case in enumerate(cases):
+    for identity_id, case in enumerate(TEST_CASES, start=1):
         case = copy.deepcopy(case)
-        ctx = case["context"]
-        env = ctx["environment"]
-        env["key"] = parity_env_key(i, env.get("key", ""))
-        env_id = _q(env["key"])
+        evaluation_context = case["context"]
 
-        ident = ctx.get("identity") or {}
-        identifier = _q(ident.get("identifier") or "")
-        identity_key = _q(ident.get("key") or "")
-        identity_id = i + 1
-        traits = ident.get("traits") or {}
-        if traits:
-            traits_lit = f"PARSE_JSON('{_q(json.dumps(traits))}')"
-        else:
-            traits_lit = "NULL"
-        selects.append(
-            f"SELECT '{env_id}', {identity_id}, '{identifier}', '{identity_key}', {traits_lit}"
-        )
+        # Make every environment unique so per-case rows don't collide
+        # when source cases share an `environment.key`.
+        env = evaluation_context["environment"]
+        env["key"] += str(identity_id)
         overridden.append(case)
 
+        # Cases without an identity have no row in IDENTITIES; the SQL
+        # we emit for their segments is row-independent (constant FALSE
+        # / TRUE via `_engine_static_verdict` or the identity-object
+        # fallback), so a missing row gives the right answer.
+        identity_context: IdentityContext | None = evaluation_context.get("identity")
+        if not identity_context:
+            continue
+        env_id = _q(env["key"])
+        identifier = _q(identity_context.get("identifier") or "")
+        identity_key = _q(identity_context.get("key") or "")
+        traits = identity_context.get("traits") or {}
+        if traits:
+            traits_literal = f"PARSE_JSON('{_q(json.dumps(traits))}')"
+        else:
+            traits_literal = "NULL"
+        selects.append(
+            f"SELECT '{env_id}', {identity_id}, '{identifier}', '{identity_key}', {traits_literal}"
+        )
+
     snowflake_session.sql(
-        f"INSERT INTO {snowflake_identity_table} (environment_id, id, identifier, identity_key, traits) "
-        + "\nUNION ALL\n".join(selects)
+        f"INSERT INTO {snowflake_identity_table} "
+        "(environment_id, id, identifier, identity_key, traits) " + "\nUNION ALL\n".join(selects)
     ).collect()
-    yield overridden
+
+    return overridden
 
 
 @pytest.fixture(scope="session")
 def parity_results(
-    snowflake_session: Any,
+    snowflake_session: Session,
     snowflake_identity_table: str,
-    loaded_cases: list[EngineTestCase],
-) -> dict[tuple[int, str], bool | None]:
+    snowflake_identities: list[EngineTestCase],
+) -> dict[tuple[int, str], bool]:
     """Run every (case, segment) pair's translated SQL in one mega-query
     and return a `(case_idx, seg_key) -> bool` dict. Every case in the
     dataset compiles today (cases that need to fall back to the engine
@@ -183,7 +175,7 @@ def parity_results(
     """
     pairs: list[tuple[int, str, str, str]] = []
     select_clauses: list[str] = []
-    for case_idx, case in enumerate(loaded_cases):
+    for case_idx, case in enumerate(snowflake_identities):
         eval_ctx = case["context"]
         env_key = eval_ctx["environment"]["key"]
         for seg_key, segment in (eval_ctx.get("segments") or {}).items():
