@@ -786,6 +786,63 @@ def test_translate_segment__not_contains_on_trait__inverts_position() -> None:
     assert "POSITION('G', (i.traits:\"country\")::STRING) > 0" in sql
 
 
+def test_translate_segment__condition_on_unmapped_identity_field__returns_none() -> None:
+    # Given a condition on `$.identity.<X>` where `<X>` isn't `identifier`,
+    # `key`, or `traits.<…>` — our row schema doesn't represent it
+    seg = {
+        "key": "u3",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [{"operator": "EQUAL", "property": "$.identity.foo", "value": "x"}],
+            }
+        ],
+    }
+
+    # When / Then the translator declines (caller falls back to the engine)
+    assert translate_segment(seg, _ctx()) is None
+
+
+def test_translate_segment__condition_on_identity_path_with_wildcard__returns_none() -> None:
+    # Given a condition on `$.identity.traits.*` (a wildcard-selector path —
+    # the engine can resolve it, but we can't map it to a fixed row reference)
+    seg = {
+        "key": "u4",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [
+                    {"operator": "IS_SET", "property": "$.identity.traits.*", "value": ""}
+                ],
+            }
+        ],
+    }
+
+    # When / Then the translator declines
+    assert translate_segment(seg, _ctx()) is None
+
+
+def test_translate_segment__percentage_split_on_unmapped_identity_field__returns_none() -> None:
+    # Given a PERCENTAGE_SPLIT on a `$.identity.<X>` we can't represent
+    seg = {
+        "key": "ps8",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [
+                    {"operator": "PERCENTAGE_SPLIT", "property": "$.identity.foo", "value": "50"}
+                ],
+            }
+        ],
+    }
+
+    # When / Then the translator declines (caller falls back)
+    assert translate_segment(seg, _ctx()) is None
+
+
 def test_translate_segment__percentage_split_on_identity_identifier__hashes_column() -> None:
     # Given a PERCENTAGE_SPLIT keyed on `$.identity.identifier`
     seg = {

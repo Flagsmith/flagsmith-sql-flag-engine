@@ -198,6 +198,59 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _classify_jsonpath(
+    prop: str,
+) -> tuple[str, ...] | None:
+    """Classify a JSONPath property by what it resolves to in the SQL setting.
+
+    Identity is per-row in our query model (each `IDENTITIES` row IS an
+    identity), but the engine treats `$.identity.*` as a lookup against the
+    eval-context identity. Most identity-bound paths therefore need to map
+    to a row reference, not be statically pre-computed against the eval
+    context.
+
+    Returns one of:
+      - `("identifier",)`     — `$.identity.identifier` (any syntax)
+      - `("key",)`            — `$.identity.key` (any syntax)
+      - `("trait", "<key>")`  — `$.identity.traits.<key>` (any syntax)
+      - `("untranslatable",)` — under `$.identity` but doesn't map to row state
+      - `("static",)`         — non-identity (env, feature, etc.); pre-computable
+      - `None`                — not valid JSONPath syntax; caller falls back to
+                                a literal trait-key lookup, mirroring the engine
+    """
+    try:
+        compiled = jsonpath_rfc9535.compile(prop)
+    except jsonpath_rfc9535.JSONPathSyntaxError:
+        return None
+    names: list[str] = []
+    for s in compiled.segments:
+        if len(s.selectors) != 1:  # pragma: no cover - multi-selector segments not in dataset
+            break
+        name = getattr(s.selectors[0], "name", None)
+        if name is None:
+            break
+        names.append(name)
+    else:
+        if names and names[0] == "identity":
+            if len(names) == 1:
+                # `$.identity` — the whole identity object. Operators that
+                # take a scalar fail-cast on a dict and the engine returns
+                # False; static eval gives the same per-row answer.
+                return ("static",)
+            if len(names) == 2 and names[1] == "identifier":
+                return ("identifier",)
+            if len(names) == 2 and names[1] == "key":
+                return ("key",)
+            if len(names) == 3 and names[1] == "traits":
+                return ("trait", names[2])
+            return ("untranslatable",)
+    if names and names[0] == "identity":
+        # Identity path with non-name selectors (wildcards, filters, etc.) —
+        # we can't map those to fixed row references.
+        return ("untranslatable",)
+    return ("static",)
+
+
 def _engine_static_verdict(ctx: TranslateContext, cond: SegmentCondition) -> str:
     """Run a single condition through `is_context_in_segment` against the
     eval context and emit `'TRUE'`/`'FALSE'`. Used for JSONPath conditions
@@ -389,6 +442,17 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     prop = cond.get("property") or ""
     val = cond.get("value")
 
+    # Classify any JSONPath-shaped property up front. Identity-bound paths
+    # (`$.identity.identifier`, `$.identity.key`, `$.identity.traits.<x>`) map
+    # to row references; non-identity paths are eval-ctx-bound (constant for
+    # every row) and get pre-computed; bad JSONPath syntax falls back to a
+    # literal trait-key lookup, mirroring the engine.
+    classification: tuple[str, ...] | None = None
+    if prop.startswith("$"):
+        classification = _classify_jsonpath(prop)
+        if classification and classification[0] == "trait":
+            prop = classification[1]  # rewrite to bare trait key for downstream
+
     # PERCENTAGE_SPLIT — inline pure-SQL hash, no UDF.
     if op == "PERCENTAGE_SPLIT":
         # `translate_segment` always injects `segment_key` from the segment
@@ -410,22 +474,25 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             if not identity.get("key"):
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
-        elif prop == "$.identity.key":
+        elif classification == ("key",):
             if not identity.get("key"):
                 return "FALSE"
-            value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr(prop))
-        elif prop == "$.identity.identifier":
+            value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.key"))
+        elif classification == ("identifier",):
             if not identity.get("identifier"):
                 return "FALSE"
-            value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr(prop))
-        elif prop.startswith("$."):
-            # Non-identity JSONPath: the engine resolves it against the eval
-            # context. If unresolvable or not a primitive, engine returns
-            # False; otherwise we'd need to bake the resolved value as a
-            # literal hash subject — leave that as future work and let the
-            # caller fall back to the engine for now.
+            value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.identifier"))
+        elif classification == ("untranslatable",):
+            # `$.identity.<X>` we don't represent in the row schema.
+            return None
+        elif classification == ("static",):
+            # Non-identity JSONPath: the engine hashes the resolved value.
+            # We'd need to bake it as a literal hash subject — leave for
+            # future work and let the caller fall back to the engine.
             return None
         else:
+            # Plain trait key (or `$.identity.traits.<X>` rewritten to the
+            # bare key): hash subject pulls from `i.traits:"<key>"` per row.
             traits = identity.get("traits") or {}
             if not isinstance(traits, dict) or prop not in traits:
                 return "FALSE"
@@ -437,25 +504,24 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         # nothing, the comparator's cast fails, returns False.
         return "FALSE"
 
-    # JSONPath properties: row-bound identity columns stay as column refs;
-    # everything else resolves against the eval context (constant for every
-    # row in the query) and gets pre-computed via the engine. Properties
-    # that start with `$.` but don't parse as JSONPath fall back to a trait
-    # lookup with `prop` used verbatim as the key — same as the engine.
-    if prop in ("$.identity.identifier", "$.identity.key"):
-        path = ctx.jsonpath_expr(prop)
+    if classification in (("identifier",), ("key",)):
+        path = ctx.jsonpath_expr(
+            "$.identity.identifier" if classification == ("identifier",) else "$.identity.key"
+        )
         if op == "IS_SET":
             return "TRUE"
         if op == "IS_NOT_SET":
             return "FALSE"
         return _comparison(ctx, op, path, val, is_jsonpath=True)
-    if prop.startswith("$."):
-        try:
-            jsonpath_rfc9535.compile(prop)
-        except jsonpath_rfc9535.JSONPathSyntaxError:
-            pass  # treat as trait key — fall through to trait branch
-        else:
-            return _engine_static_verdict(ctx, cond)
+    if classification == ("untranslatable",):
+        # Identity-bound JSONPath we can't map to row state — caller falls
+        # back to the engine.
+        return None
+    if classification == ("static",):
+        return _engine_static_verdict(ctx, cond)
+    # Either no JSONPath prefix, or `prop` started with `$` but JSONPath
+    # syntax parsing failed — engine treats the latter as a literal trait
+    # key. Fall through to the trait branch.
 
     # Trait-bound predicates → VARIANT path-extraction on i.traits:"<key>".
     path = ctx.trait_path(prop)
