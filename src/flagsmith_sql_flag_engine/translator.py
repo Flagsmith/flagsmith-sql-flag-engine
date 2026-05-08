@@ -1,30 +1,16 @@
 """Translate `SegmentContext` predicate trees into SQL `WHERE` expressions.
 
 The translator emits a predicate that goes against an `IDENTITIES` table
-whose schema is owned by the active `Dialect` (see `dialect.schema_ddl`).
+whose schema is owned by the active `Dialect`; see `dialect.schema_ddl`.
 Trait-bound conditions become trait-path lookups via `dialect.trait_path`
 — Snowflake's implementation extracts from a `VARIANT` column, but the
 translator never assumes that storage shape. `PERCENTAGE_SPLIT` and
 `:semver`-marked comparators compile to inline pure-SQL through the
-dialect's primitives (hashing, regex, casts, etc.).
-
-Output shape::
-
-    SELECT ... FROM IDENTITIES i
-    WHERE i.environment_id = '<env-key>'
-      AND <returned expression>
-
-The caller is responsible for the surrounding query. The translator only
-produces the predicate.
+dialect's hashing, regex, and cast primitives.
 
 `environment_id` in the `IDENTITIES` table is a string column holding
 `EnvironmentContext.key` — the same identifier the engine uses. There is
 no separate integer PK.
-
-Returns `None` if any condition uses an untranslatable operator —
-specifically REGEX patterns containing backreferences or lookarounds
-(RE2 doesn't support them). Callers should fall back to the Python
-flag_engine for those segments, or surface an error at segment-edit time.
 """
 
 from __future__ import annotations
@@ -99,17 +85,15 @@ _HASH_CONST_LOW = 6835  # 16^8 mod 9999
 class TranslateContext:
     """Inputs the translator needs to produce a query for a specific shape.
 
-    `evaluation_context` — flag_engine `EvaluationContext` TypedDict.
-                        `context.identity` ignored since identity values come from
-                        each `IDENTITIES` row at SQL execution time.
-    `dialect`         — required implementation of the `Dialect` protocol.
-                        The dialect owns the IDENTITIES schema, so column
-                        references are derived via dialect methods rather
-                        than configured here.
-    `identities_alias` — table alias for `IDENTITIES` in the surrounding
-                        query (default `i`).
-    `segment_key`     — salts `PERCENTAGE_SPLIT`. Auto-injected from the
-                        segment's `key` field by `translate_segment`.
+    `evaluation_context` is a flag_engine `EvaluationContext`. Its
+    `identity` field is ignored since identity values come from each
+    `IDENTITIES` row at SQL execution time. `dialect` is an
+    implementation of the `Dialect` protocol; it owns the IDENTITIES
+    schema, so column references come from dialect methods rather than
+    being configured here. `identities_alias` is the table alias for
+    `IDENTITIES` in the surrounding query — defaults to `i`.
+    `segment_key` salts `PERCENTAGE_SPLIT` and is auto-injected from
+    the segment's `key` field by `translate_segment`.
     """
 
     def __init__(
@@ -132,18 +116,15 @@ class TranslateContext:
         """Dialect-specific path-extraction for a trait value."""
         return self.dialect.trait_path(self.identities_alias, trait_key)
 
-    def jsonpath_expr(self, prop: str) -> str:
+    def jsonpath_expr(self, prop: Literal["$.identity.identifier", "$.identity.key"]) -> str:
         # Only the row-bound identity columns need an SQL expression — every
         # other JSONPath property is resolved against the eval context up in
-        # `translate_condition` via `_engine_static_verdict`. Callers must
-        # gate on the property being one of the two identity columns.
-        if prop == "$.identity.identifier":
-            return self.dialect.identifier_expr(self.identities_alias)
-        if prop == "$.identity.key":
-            return self.dialect.identity_key_expr(self.identities_alias)
-        raise AssertionError(  # pragma: no cover - internal-misuse guard
-            f"jsonpath_expr called with non-identity property: {prop!r}"
-        )
+        # `translate_condition` via `_engine_static_verdict`.
+        match prop:
+            case "$.identity.identifier":
+                return self.dialect.identifier_expr(self.identities_alias)
+            case "$.identity.key":
+                return self.dialect.identity_key_expr(self.identities_alias)
 
     def with_segment_key(self, key: str) -> TranslateContext:
         return TranslateContext(
@@ -165,9 +146,9 @@ def _percentage_split_expr(
     """Boolean SQL fragment: hash(seg_key + "," + value) <= threshold.
 
     Mirrors `flag_engine.utils.hashing.get_hashed_percentage_for_object_ids`
-    via four 8-hex-char chunks combined modulo 9999. Diverges from the engine
-    on the ~1/9999 inputs where the bare hash mod 9999 == 9998 (engine
-    recurses with doubled input; we skip).
+    via four 8-hex-char chunks combined modulo 9999. Diverges from the
+    engine on the ~1/9999 inputs where the bare hash mod 9999 == 9998 —
+    the engine recurses with doubled input; we don't.
     """
     d = ctx.dialect
     seg_lit = string_literal(seg_key)
@@ -226,15 +207,15 @@ class JsonpathClassification(NamedTuple):
 def _classify_jsonpath(prop: str) -> JsonpathClassification:
     """Classify a JSONPath property by what it resolves to in the SQL setting.
 
-    Identity is per-row in our query model (each `IDENTITIES` row IS an
-    identity), but the engine treats `$.identity.*` as a lookup against the
-    eval-context identity. Most identity-bound paths therefore need to map
-    to a row reference, not be statically pre-computed against the eval
-    context.
+    Identity is per-row in our query model — each `IDENTITIES` row IS an
+    identity — but the engine treats `$.identity.*` as a lookup against
+    the eval-context identity. Most identity-bound paths therefore need
+    to map to a row reference, not be statically pre-computed against
+    the eval context.
 
-    A `prop` that doesn't parse as JSONPath is classified as a `("trait",
-    prop)` — the engine treats unparseable `$.`-prefixed properties as
-    literal trait keys, and we mirror that.
+    A `prop` that doesn't parse as JSONPath classifies as a trait keyed
+    by the prop string itself — the engine treats unparseable `$.`-
+    prefixed properties as literal trait keys, and we mirror that.
     """
     try:
         compiled = jsonpath_rfc9535.compile(prop)
@@ -251,13 +232,13 @@ def _classify_jsonpath(prop: str) -> JsonpathClassification:
     else:
         if names and names[0] == "identity":
             if len(names) == 1:
-                # `$.identity` — the whole identity object. Every row in the
-                # IDENTITIES table IS an identity by construction, so we
-                # don't go through the eval context (which may or may not
-                # carry an identity, depending on caller). The translator
-                # encodes the row-truth directly: IS_SET → TRUE, IS_NOT_SET
-                # → FALSE, scalar comparators → FALSE (engine fail-casts on
-                # a dict).
+                # `$.identity` — the whole identity object. Every row in
+                # the IDENTITIES table IS an identity by construction,
+                # so we don't go through the eval context — which may or
+                # may not carry an identity, depending on caller. The
+                # translator encodes the row-truth directly: IS_SET →
+                # TRUE, IS_NOT_SET → FALSE, scalar comparators → FALSE,
+                # mirroring the engine's fail-cast on a dict.
                 return JsonpathClassification("identity_object")
             if len(names) == 2 and names[1] == "identifier":
                 return JsonpathClassification("identifier")
@@ -267,8 +248,8 @@ def _classify_jsonpath(prop: str) -> JsonpathClassification:
                 return JsonpathClassification("trait", names[2])
             return JsonpathClassification("untranslatable")
     if names and names[0] == "identity":
-        # Identity path with non-name selectors (wildcards, filters, etc.) —
-        # we can't map those to fixed row references.
+        # Identity path with non-name selectors — wildcards, filters,
+        # etc. — we can't map those to fixed row references.
         return JsonpathClassification("untranslatable")
     return JsonpathClassification("static")
 
@@ -290,7 +271,7 @@ def _engine_static_verdict(ctx: TranslateContext, cond: SegmentCondition) -> str
 def _engine_in_values(value: object) -> list[str] | None:
     """Mirror `flag_engine.segments.evaluator._get_in_values`: parse a segment
     value into a list of candidate strings. Returns None for inputs the
-    engine doesn't accept (non-string, non-list)."""
+    engine doesn't accept — anything that's neither a string nor a list."""
     if isinstance(value, list):
         return [v if isinstance(v, str) else str(v) for v in value]
     if not isinstance(value, str):
@@ -314,12 +295,14 @@ def _comparison(
 ) -> str | None:
     """Emit a SQL fragment comparing `expr` against `value` per `op`.
 
-    Used for both trait references (cast via the dialect as needed) and
-    JSONPath references (already-typed columns or string literals).
-    Returns `None`
-    only for genuinely-untranslatable inputs (e.g. RE2-unsafe regex);
-    inputs the engine evaluates to a deterministic False (missing value,
-    non-numeric operand on a comparator) compile to `"FALSE"`.
+    Used for both trait references — cast via the dialect as needed —
+    and JSONPath references, which arrive as already-typed columns or
+    string literals.
+
+    Returns `None` only for genuinely untranslatable inputs such as
+    RE2-unsafe regex. Inputs the engine evaluates to a deterministic
+    False — missing value, non-numeric operand on a comparator — compile
+    to `"FALSE"`.
     """
     if value is None:
         return "FALSE"
@@ -352,8 +335,8 @@ def _comparison(
     if op == "MODULO":
         parsed = modulo_literal(value)
         if parsed is None:
-            # Bad operand (`""`, `"invalid|value"`, etc.) — engine catches
-            # the cast error and returns False.
+            # Bad operand — empty string, missing separator, non-numeric
+            # side. Engine catches the cast error and returns False.
             return "FALSE"
         divisor_lit, remainder_lit = parsed
         mod_expr = d.mod(d.cast_number(expr), divisor_lit)
@@ -389,18 +372,18 @@ def _translate_trait_op(
     op: ConditionOperator,
     val: object,
 ) -> str | None:
-    """Translate `op` on a literal trait key into SQL. Returns `None` for
-    inputs the translator can't compile (e.g. RE2-unsafe regex)."""
+    """Translate `op` on a literal trait key into SQL. Returns `None`
+    for inputs the translator can't compile, such as RE2-unsafe regex."""
     path = ctx.trait_path(trait_key)
     if op == "IS_SET":
         return f"{path} IS NOT NULL"
     if op == "IS_NOT_SET":
         return f"{path} IS NULL"
 
-    # Semver-marked comparator (segment value ends with `:semver`). Engine
-    # only invokes its semver path for the comparators below; other operators
-    # treat the `:semver` suffix as ordinary string content, which is what
-    # the fall-through handlers already do.
+    # Semver-marked comparator — the segment value ends with `:semver`.
+    # Engine only invokes its semver path for the comparators below;
+    # other operators treat the `:semver` suffix as ordinary string
+    # content, which is what the fall-through handlers already do.
     if isinstance(val, str) and val.endswith(":semver") and op in _SEMVER_OPS:
         bare = val[:-7]
         bare_lit = string_literal(bare)
@@ -411,9 +394,9 @@ def _translate_trait_op(
             f"{_semver_sort_key_expr(ctx, bare_lit)})"
         )
 
-    # Type-aware comparators on traits — delegate to the dialect, since the
-    # discriminator (TYPEOF / IS_*), runtime type-coercion casts, and
-    # short-circuit pitfalls are all engine-specific.
+    # Type-aware comparators on traits — delegate to the dialect. The
+    # discriminator funcs like TYPEOF / IS_*, runtime type-coercion
+    # casts, and short-circuit pitfalls are all engine-specific.
     if op in {"EQUAL", "NOT_EQUAL"} and val is not None:
         negate = op == "NOT_EQUAL"
         eq_pred = ctx.dialect.trait_eq(ctx.identities_alias, trait_key, val, negate=negate)
@@ -421,7 +404,8 @@ def _translate_trait_op(
     if op == "IN":
         items = _engine_in_values(val)
         if items is None:
-            # Bad IN value (non-string, non-list) — engine returns False.
+            # Bad IN value — neither a string nor a list. Engine returns
+            # False.
             return "FALSE"
         in_pred = ctx.dialect.trait_in(ctx.identities_alias, trait_key, items)
         return f"({path} IS NOT NULL AND {in_pred})"
@@ -437,12 +421,12 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     prop = cond.get("property") or ""
     val = cond.get("value")
 
-    # Classify the property up front. Identity-bound JSONPaths
-    # (`$.identity.identifier`, `$.identity.key`, `$.identity.traits.<x>`) map
-    # to row references; non-identity JSONPaths are eval-ctx-bound (constant
-    # for every row) and get pre-computed via the engine. Bare trait keys
-    # bypass the JSONPath compile — they're classified as a literal trait
-    # lookup directly.
+    # Classify the property up front. Identity-bound JSONPaths —
+    # `$.identity.identifier`, `$.identity.key`, `$.identity.traits.<x>` —
+    # map to row references; non-identity JSONPaths are eval-ctx-bound,
+    # constant for every row, and get pre-computed via the engine. Bare
+    # trait keys bypass the JSONPath compile — they're classified as a
+    # literal trait lookup directly.
     classification = (
         _classify_jsonpath(prop) if prop.startswith("$.") else JsonpathClassification("trait", prop)
     )
@@ -452,7 +436,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         assert classification.trait_key is not None
         prop = classification.trait_key
 
-    # PERCENTAGE_SPLIT — inline pure-SQL hash, no UDF.
+    # PERCENTAGE_SPLIT — inline pure-SQL hash.
     if op == "PERCENTAGE_SPLIT":
         # `translate_segment` always injects `segment_key` from the segment
         # before recursing; reaching here without one means a caller invoked
@@ -469,8 +453,8 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         kind = classification.kind
         if not prop:
             # Implicit `$.identity.key` — engine returns False when no
-            # identity, or when the identity lacks `key` (the engine never
-            # synthesises one from env+identifier).
+            # identity, or when the identity lacks `key`. The engine
+            # never synthesises one from env+identifier.
             if not identity.get("key"):
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
@@ -483,7 +467,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.identifier"))
         elif kind == "identity_object":
-            # PERCENTAGE_SPLIT on `$.identity` (the whole dict) — engine
+            # PERCENTAGE_SPLIT on `$.identity` — the whole dict. Engine
             # hashes `str(dict)`, which is a stable but useless subject;
             # nobody writes this in practice. Treat as untranslatable.
             return None
@@ -496,8 +480,9 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             # future work and let the caller fall back to the engine.
             return None
         else:
-            # Plain trait key (or `$.identity.traits.<X>` rewritten to the
-            # bare key): hash subject pulls from `i.traits:"<key>"` per row.
+            # Plain trait key, or `$.identity.traits.<X>` rewritten to
+            # the bare key. Hash subject pulls from `i.traits:"<key>"`
+            # per row.
             traits = identity.get("traits") or {}
             if not isinstance(traits, dict) or prop not in traits:
                 return "FALSE"
@@ -513,10 +498,11 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         return _translate_trait_op(ctx, prop, op, val)
 
     # Non-trait classifications. We don't replicate the engine's per-row
-    # trait-first dispatch (would roughly double the cost of every wrapped
-    # JSONPath condition); a row that happens to carry a trait literally
-    # named e.g. `$.identity` would shadow our resolution. Niche shape;
-    # the engine parity suite xfails the one engine-test-data case that hits it.
+    # trait-first dispatch — it would roughly double the cost of every
+    # wrapped JSONPath condition. A row that happens to carry a trait
+    # literally named e.g. `$.identity` would shadow our resolution.
+    # Niche shape; the engine-parity suite xfails the one engine-test-
+    # data case that hits it.
     if classification.kind in ("identifier", "key"):
         path = ctx.jsonpath_expr(
             "$.identity.identifier" if classification.kind == "identifier" else "$.identity.key"
@@ -527,12 +513,12 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             return "FALSE"
         return _comparison(ctx, op, path, val, is_jsonpath=True)
     if classification.kind == "identity_object":
-        # `$.identity` — engine treats non-primitive lookups as "not set"
-        # (deliberate: there's no operator that meaningfully takes an
-        # object). So IS_SET → FALSE, IS_NOT_SET → TRUE, every scalar
-        # comparator fail-casts on the dict → FALSE. The SQL answer is
-        # the same for every row regardless of whether the eval context
-        # carries an identity, so we encode it directly.
+        # `$.identity` — engine treats non-primitive lookups as "not
+        # set" by design; no operator meaningfully takes an object. So
+        # IS_SET → FALSE, IS_NOT_SET → TRUE, every scalar comparator
+        # fail-casts on the dict → FALSE. The SQL answer is the same
+        # for every row regardless of whether the eval context carries
+        # an identity, so we encode it directly.
         return "TRUE" if op == "IS_NOT_SET" else "FALSE"
     if classification.kind == "untranslatable":
         # Identity-bound JSONPath we can't map to row state — caller falls
@@ -571,12 +557,21 @@ def translate_rule(rule: SegmentRule, ctx: TranslateContext) -> str | None:
 
 
 def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | None:
-    """Return a SQL `WHERE` expression for the segment, or None if any
-    condition uses an operator the translator can't handle (REGEX with
-    backreferences or lookarounds).
+    """Return a SQL `WHERE` expression for the segment.
 
-    The expression goes after `WHERE i.environment_id = '<env-key>' AND ...`.
-    The caller composes the surrounding `SELECT ... FROM IDENTITIES i`.
+    Output shape::
+
+        SELECT ... FROM IDENTITIES i
+        WHERE i.environment_id = '<env-key>'
+          AND <returned expression>
+
+    The caller composes the surrounding query; the translator only
+    produces the predicate.
+
+    Returns `None` if any condition uses an untranslatable operator —
+    currently REGEX patterns containing backreferences or lookarounds,
+    which RE2 does not support. Callers should fall back to
+    `flag_engine.is_context_in_segment` for those segments.
     """
     ctx = ctx.with_segment_key(segment["key"])
     rules = segment.get("rules") or []

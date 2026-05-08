@@ -1,33 +1,31 @@
 """SQL escape and validation primitives, shared by the translator.
 
-The translator emits SQL by string composition rather than via a query-builder
-library. That means every value that comes from a `SegmentCondition` (operand,
-trait key, segment key, env constants) needs to be escaped or validated
-before it lands in a SQL fragment. This module is the single home for that
-escape / validation logic.
+The translator emits SQL by string composition rather than via a query-
+builder. Every value originating in a `SegmentCondition` or evaluation
+context must be escaped or validated before it lands in a SQL fragment;
+this module is the single home for that logic.
 
-**For future contributors**: if you find yourself f-string-interpolating a
-value that originated in a segment definition or evaluation context, route
-it through one of the helpers here. Bypassing this layer is how SQL injection
-happens — the audit trail is the call sites of these functions.
+If you find yourself f-string-interpolating a segment- or context-derived
+value, route it through one of these helpers. Bypassing this layer is how
+SQL injection happens; the audit trail is the call sites here.
 
 Threat model: segment definitions come from Flagsmith users with
-`MANAGE_SEGMENTS` permission on a project. Trusted-but-not-fully-trusted —
-a malicious operand value should not be able to escalate to arbitrary SQL
+`MANAGE_SEGMENTS` permission on a project — trusted-but-not-fully-trusted.
+A malicious operand value must not be able to escalate to arbitrary SQL
 execution against the analytical store.
 
 Functions in this module are dialect-agnostic. Anything that depends on
-SQL-engine syntax (VARIANT path quoting, JSONB extraction, casts) lives on
-the `Dialect` protocol instead.
+SQL-engine syntax — VARIANT path quoting, JSONB extraction, casts — lives
+on the `Dialect` protocol instead.
 """
 
 
 def escape_string(value: str) -> str:
     """Double single quotes for inclusion inside a SQL string literal.
 
-    Use when the caller is composing a larger literal (e.g. CSV-style
-    `IN ('a','b','c')`) and wants the un-wrapped escape. For the common
-    case of a single value, prefer `string_literal`.
+    Use when the caller is composing a larger literal — for example a
+    CSV-style `IN ('a','b','c')` — and wants the un-wrapped escape. For
+    a single standalone value, prefer `string_literal`.
     """
     return value.replace("'", "''")
 
@@ -41,8 +39,8 @@ def numeric_literal(value: object) -> str | None:
     """Validate `value` is numeric and return its canonical-float string form.
 
     Returns `None` if `value` is not parseable as a float — the caller
-    should propagate that as "untranslatable", giving the segment-edit
-    UI a clean failure mode instead of injecting unparseable SQL.
+    propagates that as "untranslatable" rather than injecting unparseable
+    SQL.
 
     Booleans are rejected explicitly: `float(True) == 1.0` in Python,
     but the engine treats segment-value booleans as strings via its

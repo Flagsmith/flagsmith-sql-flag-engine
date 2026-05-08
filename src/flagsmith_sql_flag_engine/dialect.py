@@ -1,10 +1,10 @@
 """Dialect protocol — primitives the translator needs to emit dialect-correct SQL.
 
-The translator's structure (rule walker, condition routing, EXISTS composition)
-is dialect-agnostic. The dialect-specific bits are the small SQL fragments that
-differ across engines: how to compute MD5 → hex digest, how to parse 8 hex
-chars to a 32-bit integer, what the syntax for prefix-anchored regex match is,
-and so on.
+The translator's structure — rule walker, condition routing, predicate
+composition — is dialect-agnostic. The dialect-specific bits are the
+small SQL fragments that differ across engines: how to compute MD5 →
+hex digest, how to parse 8 hex chars to a 32-bit integer, what the
+syntax for prefix-anchored regex match is, and so on.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ class Dialect(Protocol):
     """Per-dialect SQL fragments. All methods return SQL string fragments
     that get composed into the final WHERE clause.
 
-    The methods that take expressions take them as already-formatted SQL
-    strings (e.g. column references, string literals); the dialect only
+    Methods that take expressions take them as already-formatted SQL
+    strings — column references, string literals, etc. The dialect only
     chooses the right SQL syntax for the operation.
     """
 
@@ -25,7 +25,7 @@ class Dialect(Protocol):
 
     # --- IDENTITIES schema access ---
     #
-    # The dialect owns the canonical IDENTITIES schema (see `schema_ddl`),
+    # The dialect owns the canonical IDENTITIES schema, see `schema_ddl`,
     # so it also owns the SQL expression for each logical column. The
     # translator just hands over an alias.
 
@@ -46,10 +46,11 @@ class Dialect(Protocol):
 
     def trait_eq(self, alias: str, trait_key: str, value: object, negate: bool) -> str:
         """Type-aware EQUAL / NOT_EQUAL predicate on a trait, mirroring
-        `flag_engine`'s per-type coercion (segment value cast to the
-        trait's runtime type before compare; cast failure → no match for
-        both ops). Implementation is dialect-specific because trait-type
-        discrimination and runtime type-coercion casts both vary by engine.
+        `flag_engine`'s per-type coercion: the segment value is cast to
+        the trait's runtime type before compare, and a cast failure
+        means no match for both ops. Implementation is dialect-specific
+        because trait-type discrimination and runtime type-coercion
+        casts both vary by engine.
         """
         ...
 
@@ -64,7 +65,7 @@ class Dialect(Protocol):
     # --- string operations ---
 
     def position(self, needle_lit: str, haystack_expr: str) -> str:
-        """Boolean: does `needle_lit` (a SQL string literal) appear in
+        """Boolean: does the string literal `needle_lit` appear in
         `haystack_expr`? Used for CONTAINS / NOT_CONTAINS."""
         ...
 
@@ -80,11 +81,12 @@ class Dialect(Protocol):
 
     def regexp_anchored_match(self, value_expr: str, pattern: str) -> str:
         """Boolean: equivalent to Python `re.match(pattern, value)` —
-        anchored at position 0, may be a prefix of the value (not full-match).
+        anchored at position 0, may be a prefix of the value, not a
+        full-match.
 
-        `pattern` is the raw Python regex string; the dialect handles its
-        own escaping into a SQL literal (regex flavours differ in how
-        backslashes are treated)."""
+        `pattern` is the raw Python regex string; the dialect handles
+        its own escaping into a SQL literal, since regex flavours
+        differ in how backslashes are treated."""
         ...
 
     def regexp_nth_digit_run(self, value_expr: str, n: int) -> str:
@@ -114,8 +116,8 @@ class Dialect(Protocol):
         ...
 
     def cast_number(self, expr: str) -> str:
-        """Cast `expr` to a NUMBER / BIGINT (engine-side numeric type for
-        modulo arithmetic)."""
+        """Cast `expr` to a NUMBER / BIGINT — the engine-side numeric
+        type used for modulo arithmetic."""
         ...
 
     # --- composition ---

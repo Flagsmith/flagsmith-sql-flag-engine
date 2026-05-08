@@ -8,7 +8,7 @@ SQL goes against a single `IDENTITIES` table — one row per identity, with
 the identity's full trait map held in a `traits` `VARIANT` column. Trait
 keys are *data* in the VARIANT, not schema columns; new keys never require
 DDL. `PERCENTAGE_SPLIT` and `:semver`-marked comparators compile to inline
-pure-SQL — no UDF call required at runtime.
+pure-SQL.
 
 ## Quickstart
 

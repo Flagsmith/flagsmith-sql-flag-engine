@@ -2,50 +2,35 @@
 
 ## Expected schema
 
-The translator emits predicates against a single `IDENTITIES` table with
-a fixed shape: 4 typed columns (`environment_id`, `id`, `identifier`,
-`identity_key`) plus one `VARIANT` column `traits` holding the
-identity's full trait map as a JSON-shaped object. Trait keys are
-*data* in the VARIANT, not schema columns — adding new trait keys never
-requires DDL.
+The translator emits predicates against a single `IDENTITIES` table —
+four typed columns `environment_id`, `id`, `identifier`, `identity_key`,
+plus one `VARIANT` column `traits` holding the identity's full trait
+map. Trait keys are *data* in the VARIANT, not schema columns.
 
-This was chosen over column-per-trait wide-form because:
-  - Snowflake caps tables at ~3,000 columns; SaaS-aggregated trait
-    vocabularies cross that.
-  - `ALTER TABLE ADD COLUMN` on the write path needs elevated grants and
-    coordination with the CDC pipeline. VARIANT side-steps both.
-  - Snowflake's VARIANT path-extraction is columnar, not a JSON parse
-    per row; perf is within ~30% of typed columns for simple key
-    lookups based on Snowflake's published benchmarks.
+VARIANT was chosen over column-per-trait wide-form because:
 
-The *slow* PoC shape that VARIANT might be confused with was
-`OBJECT_AGG` at query time over a long-form `TRAITS` table (the CTE
-joined IDENTITIES + TRAITS and aggregated the trait map per row, every
-query — 245s at 100M). Here the VARIANT is *pre-materialised* by the
-CDC pipeline; query-time it's a single columnar read with subkey
-extraction. Different operation, different perf.
+  - Snowflake caps tables at ~3,000 columns; large trait vocabularies
+    cross that.
+  - VARIANT path-extraction is columnar, not a JSON parse per row;
+    perf is within ~30% of typed columns for simple key lookups.
 
 ## Notable choices
 
   - `MD5_HEX` returns the 32-char hex digest directly.
   - Hex-to-int parsing uses `TO_NUMBER(SUBSTR(hex, n, 8), 'XXXXXXXX')`,
     producing a non-negative number that fits Snowflake's 38-digit NUMBER.
-  - Anchored regex uses `REGEXP_INSTR(value, pattern) = 1`, which is
-    equivalent to Python's `re.match(pattern, value)` (start-anchored,
-    prefix-allowed, not full-match).
-  - n-th digit run uses `REGEXP_SUBSTR(value, '\\\\d+', 1, n)` — Snowflake's
-    occurrence parameter is 1-indexed.
+  - Anchored regex uses `REGEXP_INSTR(value, pattern) = 1`, equivalent
+    to Python's `re.match` — start-anchored, prefix-allowed, not full-
+    match.
+  - n-th digit run uses `REGEXP_SUBSTR(value, '\\\\d+', 1, n)`;
+    Snowflake's occurrence parameter is 1-indexed.
 """
 
 from __future__ import annotations
 
 from flagsmith_sql_flag_engine.utils import string_literal
 
-# Canonical schema the translator expects. Run this once when standing up
-# a Snowflake-backed Flagsmith installation; the CDC pipeline that
-# materialises IDENTITIES from the source-of-truth feed populates the
-# `traits` VARIANT with the identity's trait map. New trait keys appear
-# as new keys inside the VARIANT — no DDL required.
+# Canonical IDENTITIES schema the translator emits against.
 SCHEMA_DDL = """\
 CREATE TABLE IF NOT EXISTS IDENTITIES (
     -- environment.key from EnvironmentContext; used as the env partition
@@ -57,7 +42,7 @@ CREATE TABLE IF NOT EXISTS IDENTITIES (
     -- the identity's external identifier, exposed as $.identity.identifier
     identifier STRING NOT NULL,
 
-    -- the SDK-side composite identity key, exposed as $.identity.key
+    -- the composite identity key, exposed as $.identity.key
     identity_key STRING NOT NULL,
 
     -- the identity's full trait map: {"plan": "growth", "country": "GB", ...}.
@@ -97,11 +82,11 @@ class SnowflakeDialect:
         str_value = str(value)
         str_lit = string_literal(str_value)
         # Engine bool cast: `lambda v: v not in ("False", "false")`. We compare
-        # against the variant's `::STRING` form ('true'/'false') rather than
+        # against the variant's `::STRING` form 'true'/'false' rather than
         # invoke `(...)::BOOLEAN` directly — Snowflake's optimiser eagerly
         # evaluates the BOOLEAN cast even when the IS_BOOLEAN guard would
         # have short-circuited, and a non-bool variant blows up the query
-        # (`100037: Boolean value 'red' is not recognized`).
+        # with `100037: Boolean value 'red' is not recognized`.
         bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
         # Engine int/float cast: int(v) / float(v); ValueError → no match.
         try:
@@ -173,8 +158,8 @@ class SnowflakeDialect:
         # Snowflake's regex flavour is POSIX-style: a single backslash in the
         # SQL literal is treated as a literal backslash by both the SQL string
         # parser AND the regex engine, so `'\d'` matches the character `d`,
-        # not a digit. To get a regex metachar (`\d`, `\s`, `\w`...) we need
-        # to double the backslash so the engine sees `\\d`. SQL single quotes
+        # not a digit. To get a regex metachar like `\d`, `\s` or `\w`, we
+        # double the backslash so the engine sees `\\d`. SQL single quotes
         # are escaped by doubling per the SQL standard.
         doubled = pattern.replace("\\", "\\\\").replace("'", "''")
         return f"'{doubled}'"
@@ -204,9 +189,8 @@ class SnowflakeDialect:
         return f"({expr})::STRING"
 
     def cast_float(self, expr: str) -> str:
-        # TRY_TO_DOUBLE/TRY_TO_NUMBER (rather than TRY_CAST) because
-        # they accept VARIANT directly, and a non-numeric variant value
-        # (e.g. a string trait used in a numeric comparison) yields NULL
+        # TRY_TO_DOUBLE / TRY_TO_NUMBER instead of TRY_CAST: they accept
+        # VARIANT directly, and a non-numeric variant value yields NULL
         # instead of erroring out the whole query. Engine behaviour for
         # type-mismatched comparisons is "doesn't match", which NULL
         # propagation through the predicate gives us.

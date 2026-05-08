@@ -1,11 +1,11 @@
 """SQL translator for Flagsmith segment predicates.
 
 Public API:
-    translate_segment(segment, ctx) -> Optional[str]
+    translate_segment(segment, ctx) -> str | None
     TranslateContext
 
 See README.md for usage. The translator is dialect-aware via the `Dialect`
-protocol — `flagsmith_sql_flag_engine.dialects.snowflake.SnowflakeDialect`
+protocol; `flagsmith_sql_flag_engine.dialects.snowflake.SnowflakeDialect`
 is the only implementation today.
 """
 
