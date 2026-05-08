@@ -1,4 +1,5 @@
-"""SQL escape and validation primitives, shared by the translator.
+"""SQL escape, validation, and regex-flavour primitives, shared by
+the translator and dialects.
 
 The translator emits SQL by string composition rather than via a query-
 builder. Every value originating in a `SegmentCondition` or evaluation
@@ -18,6 +19,8 @@ Functions in this module are dialect-agnostic. Anything that depends on
 SQL-engine syntax — VARIANT path quoting, JSONB extraction, casts — lives
 on the `Dialect` protocol instead.
 """
+
+import re
 
 
 def escape_string(value: str) -> str:
@@ -52,6 +55,23 @@ def numeric_literal(value: object) -> str | None:
         return str(float(value))  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+# Conservative check for Python-re features RE2 doesn't support.
+_RE2_UNSAFE = re.compile(
+    r"\\\d"  # backreference like \1 .. \9
+    r"|\(\?[=!<]"  # lookahead / lookbehind / negative variants
+)
+
+
+def re2_safe(pattern: str) -> bool:
+    """Return True if `pattern` uses only features RE2 supports.
+
+    RE2 explicitly excludes backreferences and lookarounds. Use this as
+    the regex feature-detector in dialects whose SQL engine uses RE2 —
+    Snowflake, BigQuery, DuckDB, ClickHouse.
+    """
+    return _RE2_UNSAFE.search(pattern) is None
 
 
 def modulo_literal(value: object) -> tuple[str, str] | None:

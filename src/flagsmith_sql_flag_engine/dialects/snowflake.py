@@ -28,7 +28,7 @@ VARIANT was chosen over column-per-trait wide-form because:
 
 from __future__ import annotations
 
-from flagsmith_sql_flag_engine.utils import string_literal
+from flagsmith_sql_flag_engine.utils import re2_safe, string_literal
 
 # Canonical IDENTITIES schema the translator emits against.
 SCHEMA_DDL = """\
@@ -152,6 +152,10 @@ class SnowflakeDialect:
         return f"COALESCE({', '.join(exprs)})"
 
     # ----- regex -----
+
+    def regex_supports(self, pattern: str) -> bool:
+        # Snowflake's regex engine is RE2.
+        return re2_safe(pattern)
 
     @staticmethod
     def _regex_literal(pattern: str) -> str:

@@ -33,9 +33,10 @@ where_expr = translate_segment(segment, ctx)
 no separate integer PK.
 
 `translate_segment` returns `None` if the segment uses an operator the
-translator can't handle today (REGEX with backreferences or lookarounds —
-RE2 doesn't support them). Callers should fall back to the Python engine for
-those segments, or surface an error at segment-edit time.
+translator can't handle — a REGEX pattern the active dialect's regex
+flavour can't compile, for example backreferences or lookarounds against
+the Snowflake dialect's RE2 engine. Callers should fall back to
+`flag_engine.is_context_in_segment` for those segments.
 
 ## Schema
 
@@ -128,7 +129,7 @@ Postgres) means writing one class.
 | `GREATER_THAN`, `LESS_THAN` (+ `_INCLUSIVE`) |     yes      |                                                       |
 | `MODULO`                                     |     yes      |                                                       |
 | `PERCENTAGE_SPLIT`                           |     yes      | inlined MD5-mod-9999; ~0.005% diverge on hash==9998   |
-| `REGEX`                                      |   partial    | RE2 syntax only; backref/lookaround → caller fallback |
+| `REGEX`                                      |   partial    | dialect-flavour gated; unsupported patterns → caller fallback |
 | `:semver`-marked comparators                 |     yes      | major.minor.patch only; ignores prerelease            |
 
 ## Development

@@ -79,6 +79,13 @@ class Dialect(Protocol):
 
     # --- regex ---
 
+    def regex_supports(self, pattern: str) -> bool:
+        """Return True if this dialect's regex engine can compile
+        `pattern`. The translator falls back to `None` for any REGEX
+        condition where this returns False, letting the caller defer
+        to `flag_engine`."""
+        ...
+
     def regexp_anchored_match(self, value_expr: str, pattern: str) -> str:
         """Boolean: equivalent to Python `re.match(pattern, value)` —
         anchored at position 0, may be a prefix of the value, not a

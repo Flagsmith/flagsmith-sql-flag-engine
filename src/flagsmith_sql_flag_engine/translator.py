@@ -16,7 +16,6 @@ no separate integer PK.
 from __future__ import annotations
 
 import json
-import re
 from typing import Literal, NamedTuple
 
 import jsonpath_rfc9535
@@ -55,17 +54,6 @@ TRANSLATABLE_OPERATORS: frozenset[ConditionOperator] = frozenset(
         "REGEX",
     }
 )
-
-
-# Conservative check for Python-re features RE2 doesn't support.
-_RE2_UNSAFE = re.compile(
-    r"\\\d"  # backreference like \1 .. \9
-    r"|\(\?[=!<]"  # lookahead / lookbehind / negative variants
-)
-
-
-def _regex_safe_for_re2(pattern: str) -> bool:
-    return _RE2_UNSAFE.search(pattern) is None
 
 
 # Constants for chunked MD5-mod-9999 hash. The engine computes
@@ -299,10 +287,10 @@ def _comparison(
     and JSONPath references, which arrive as already-typed columns or
     string literals.
 
-    Returns `None` only for genuinely untranslatable inputs such as
-    RE2-unsafe regex. Inputs the engine evaluates to a deterministic
-    False — missing value, non-numeric operand on a comparator — compile
-    to `"FALSE"`.
+    Returns `None` only for genuinely untranslatable inputs such as a
+    REGEX pattern the active dialect's regex flavour can't compile.
+    Inputs the engine evaluates to a deterministic False — missing
+    value, non-numeric operand on a comparator — compile to `"FALSE"`.
     """
     if value is None:
         return "FALSE"
@@ -343,7 +331,7 @@ def _comparison(
         return f"({expr} IS NOT NULL AND ({mod_expr}) = {remainder_lit})"
     if op == "REGEX":
         pattern = str(value)
-        if not _regex_safe_for_re2(pattern):
+        if not d.regex_supports(pattern):
             return None
         return f"({expr} IS NOT NULL AND {d.regexp_anchored_match(str_expr, pattern)})"
     raise AssertionError(  # pragma: no cover - all TRANSLATABLE_OPERATORS handled above
@@ -373,7 +361,8 @@ def _translate_trait_op(
     val: object,
 ) -> str | None:
     """Translate `op` on a literal trait key into SQL. Returns `None`
-    for inputs the translator can't compile, such as RE2-unsafe regex."""
+    for inputs the translator can't compile, such as a REGEX pattern
+    the active dialect rejects."""
     path = ctx.trait_path(trait_key)
     if op == "IS_SET":
         return f"{path} IS NOT NULL"
@@ -569,8 +558,8 @@ def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | N
     produces the predicate.
 
     Returns `None` if any condition uses an untranslatable operator —
-    currently REGEX patterns containing backreferences or lookarounds,
-    which RE2 does not support. Callers should fall back to
+    currently a REGEX pattern the active dialect's regex flavour can't
+    compile. Callers should fall back to
     `flag_engine.is_context_in_segment` for those segments.
     """
     ctx = ctx.with_segment_key(segment["key"])
