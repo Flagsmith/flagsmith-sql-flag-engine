@@ -854,6 +854,26 @@ def test_translate_segment__condition_on_identity_path_with_wildcard__returns_no
     assert translate_segment(seg, _ctx()) is None
 
 
+def test_translate_segment__percentage_split_on_identity_whole_object__returns_none() -> None:
+    # Given a PERCENTAGE_SPLIT on `$.identity` (the whole dict)
+    seg = {
+        "key": "ps9",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [
+                    {"operator": "PERCENTAGE_SPLIT", "property": "$.identity", "value": "50"}
+                ],
+            }
+        ],
+    }
+
+    # When / Then the translator declines (engine would hash `str(dict)`,
+    # which is stable but useless; not worth supporting in SQL)
+    assert translate_segment(seg, _ctx()) is None
+
+
 def test_translate_segment__percentage_split_on_unmapped_identity_field__returns_none() -> None:
     # Given a PERCENTAGE_SPLIT on a `$.identity.<X>` we can't represent
     seg = {

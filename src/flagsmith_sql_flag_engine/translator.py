@@ -201,7 +201,9 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-JsonpathKind = Literal["identifier", "key", "trait", "untranslatable", "static"]
+JsonpathKind = Literal[
+    "identifier", "key", "trait", "identity_object", "untranslatable", "static"
+]
 
 
 class JsonpathClassification(NamedTuple):
@@ -243,10 +245,14 @@ def _classify_jsonpath(prop: str) -> JsonpathClassification:
     else:
         if names and names[0] == "identity":
             if len(names) == 1:
-                # `$.identity` — the whole identity object. Operators that
-                # take a scalar fail-cast on a dict and the engine returns
-                # False; static eval gives the same per-row answer.
-                return JsonpathClassification("static")
+                # `$.identity` — the whole identity object. Every row in the
+                # IDENTITIES table IS an identity by construction, so we
+                # don't go through the eval context (which may or may not
+                # carry an identity, depending on caller). The translator
+                # encodes the row-truth directly: IS_SET → TRUE, IS_NOT_SET
+                # → FALSE, scalar comparators → FALSE (engine fail-casts on
+                # a dict).
+                return JsonpathClassification("identity_object")
             if len(names) == 2 and names[1] == "identifier":
                 return JsonpathClassification("identifier")
             if len(names) == 2 and names[1] == "key":
@@ -376,7 +382,9 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     # bypass the JSONPath compile — they're classified as a literal trait
     # lookup directly.
     classification = (
-        _classify_jsonpath(prop) if prop.startswith("$") else JsonpathClassification("trait", prop)
+        _classify_jsonpath(prop)
+        if prop.startswith("$.")
+        else JsonpathClassification("trait", prop)
     )
     if classification.kind == "trait":
         # Trait keys carried via `$.identity.traits.<x>` arrive normalised
@@ -414,6 +422,11 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             if not identity.get("identifier"):
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.identifier"))
+        elif kind == "identity_object":
+            # PERCENTAGE_SPLIT on `$.identity` (the whole dict) — engine
+            # hashes `str(dict)`, which is a stable but useless subject;
+            # nobody writes this in practice. Treat as untranslatable.
+            return None
         elif kind == "untranslatable":
             # `$.identity.<X>` we don't represent in the row schema.
             return None
@@ -445,6 +458,16 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         if op == "IS_NOT_SET":
             return "FALSE"
         return _comparison(ctx, op, path, val, is_jsonpath=True)
+    if classification.kind == "identity_object":
+        # `$.identity` — engine treats non-primitive lookups as "not set"
+        # (deliberate: there's no operator that meaningfully takes an
+        # object). So IS_SET → FALSE, IS_NOT_SET → TRUE, every scalar
+        # comparator fail-casts on the dict → FALSE. The SQL answer is
+        # the same for every row regardless of whether the eval context
+        # carries an identity, so we encode it directly.
+        if op == "IS_NOT_SET":
+            return "TRUE"
+        return "FALSE"
     if classification.kind == "untranslatable":
         # Identity-bound JSONPath we can't map to row state — caller falls
         # back to the engine.
