@@ -7,8 +7,6 @@ hex digest, how to parse 8 hex chars to a 32-bit integer, what the
 syntax for prefix-anchored regex match is, and so on.
 """
 
-from __future__ import annotations
-
 from typing import Protocol
 
 

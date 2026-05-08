@@ -6,8 +6,6 @@ batched `INSERT ... SELECT UNION ALL` and `SELECT ... UNION ALL` shapes
 that round-trip through Snowflake in two queries per session.
 """
 
-from __future__ import annotations
-
 import os
 import uuid
 from collections.abc import Iterator

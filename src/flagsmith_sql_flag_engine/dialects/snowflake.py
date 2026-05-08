@@ -26,8 +26,6 @@ VARIANT was chosen over column-per-trait wide-form because:
     Snowflake's occurrence parameter is 1-indexed.
 """
 
-from __future__ import annotations
-
 from flagsmith_sql_flag_engine.utils import re2_safe, string_literal
 
 # Canonical IDENTITIES schema the translator emits against.

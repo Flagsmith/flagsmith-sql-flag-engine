@@ -7,8 +7,6 @@ Each harness needs its own SQL engine reachable; the fixtures in
 xfails live on the harness itself (see `xfail_case_names`).
 """
 
-from __future__ import annotations
-
 import pytest
 from flag_engine.segments.evaluator import is_context_in_segment
 

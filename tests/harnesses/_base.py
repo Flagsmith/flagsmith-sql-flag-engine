@@ -6,8 +6,6 @@ harnesses; a test does an in-memory dict lookup against the harness's
 results.
 """
 
-from __future__ import annotations
-
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
