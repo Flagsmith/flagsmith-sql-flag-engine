@@ -79,25 +79,6 @@ from flagsmith_sql_flag_engine.dialects.snowflake import SCHEMA_DDL
 print(SCHEMA_DDL)
 ```
 
-### Performance
-
-Measured at 870M identities on `COMPUTE_WH` X-Small, cache disabled:
-
-| scenario             | typed columns | `traits` VARIANT |
-| :------------------- | ------------: | ---------------: |
-| simple, IN + IS_SET  | 1.5s          | **2.6s**         |
-| multi, 4 conditions  | 2.1s          | **3.1s**         |
-| pure `%Split`        | 91.9s         | 91.9s            |
-
-VARIANT path-extraction adds a ~50-75% overhead vs typed-column wide-
-form, in exchange for trait keys being data rather than columns. Pure
-`%Split` is unaffected because it doesn't read traits.
-
-Warehouse-scaling is roughly linear: dividing the X-Small numbers by
-the warehouse size multiplier gives the latency on a larger warehouse.
-870M multi-condition queries land at ~750ms on Medium and ~400ms on
-Large.
-
 ## Engine parity
 
 Validated against [Flagsmith/engine-test-data](https://github.com/Flagsmith/engine-test-data),
