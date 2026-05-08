@@ -44,6 +44,23 @@ class Dialect(Protocol):
         """
         ...
 
+    def trait_eq(self, alias: str, trait_key: str, value: object, negate: bool) -> str:
+        """Type-aware EQUAL / NOT_EQUAL predicate on a trait, mirroring
+        `flag_engine`'s per-type coercion (segment value cast to the
+        trait's runtime type before compare; cast failure → no match for
+        both ops). Implementation is dialect-specific because trait-type
+        discrimination and runtime type-coercion casts both vary by engine.
+        """
+        ...
+
+    def trait_in(self, alias: str, trait_key: str, items: list[str]) -> str:
+        """Type-aware IN predicate on a trait, mirroring engine semantics:
+        string trait does direct lookup; integer trait stringifies and
+        looks up; other trait types never match. `items` is the parsed
+        candidate list per `flag_engine`'s `_get_in_values`.
+        """
+        ...
+
     # --- string operations ---
 
     def position(self, needle_lit: str, haystack_expr: str) -> str:

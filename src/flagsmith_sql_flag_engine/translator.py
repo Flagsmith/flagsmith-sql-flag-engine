@@ -1,10 +1,12 @@
 """Translate `SegmentContext` predicate trees into SQL `WHERE` expressions.
 
 The translator emits a predicate that goes against an `IDENTITIES` table
-holding a `traits` VARIANT column (per `SnowflakeDialect.SCHEMA_DDL`).
-Trait-bound conditions become VARIANT path-extractions
-(`i.traits:"<key>"`); `PERCENTAGE_SPLIT` and `:semver`-marked comparators
-compile to inline pure-SQL using the active `Dialect`.
+whose schema is owned by the active `Dialect` (see `dialect.schema_ddl`).
+Trait-bound conditions become trait-path lookups via `dialect.trait_path`
+— Snowflake's implementation extracts from a `VARIANT` column, but the
+translator never assumes that storage shape. `PERCENTAGE_SPLIT` and
+`:semver`-marked comparators compile to inline pure-SQL through the
+dialect's primitives (hashing, regex, casts, etc.).
 
 Output shape::
 
@@ -283,90 +285,6 @@ def _engine_in_values(value: object) -> list[str] | None:
     return value.split(",")
 
 
-def _trait_typed_eq(ctx: TranslateContext, path: str, value: object, negate: bool) -> str:
-    """Type-dispatched EQUAL/NOT_EQUAL on a VARIANT trait, mirroring engine
-    semantics: segment value is cast to the trait's runtime type before
-    comparison; cast failure → no match for both ops.
-
-    EQUAL is emitted as a fast string compare OR'd with type-specific
-    branches that catch the cases where the variant's `::STRING` form
-    doesn't equal the literal segment value (booleans stringify lower-
-    case; floats get expanded to scientific or full-precision forms).
-    Branches are only emitted when the segment value can be coerced to
-    that type at translate time, so a string-only segment (`"enterprise"`)
-    collapses to a single `(path)::STRING = 'enterprise'`.
-
-    NOT_EQUAL keeps the `TYPEOF`-dispatched form: it only returns True
-    when the cast succeeded *and* values differ, which an OR-of-positives
-    can't express without over-matching."""
-    d = ctx.dialect
-    str_value = str(value)
-    str_lit = string_literal(str_value)
-    str_path = d.cast_string(path)
-
-    # Engine int/float cast: int(v) / float(v); ValueError → no match.
-    try:
-        int_lit: str | None = str(int(str_value))
-    except (ValueError, TypeError):
-        int_lit = None
-    try:
-        float_lit: str | None = repr(float(str_value))
-    except (ValueError, TypeError):
-        float_lit = None
-
-    if not negate:
-        # Fast string compare always present — handles VARCHAR traits and
-        # canonically-stringified INTEGER traits in one cheap branch.
-        clauses = [f"{str_path} = {str_lit}"]
-        # Engine bool cast: `lambda v: v not in ("False", "false")`. Compare
-        # against the variant's lowercase string form — Snowflake's optimiser
-        # evaluates `(...)::BOOLEAN` eagerly even when the IS_BOOLEAN guard
-        # would have short-circuited, so we must never feed a non-bool variant
-        # into a BOOLEAN cast (`100037: Boolean value 'red' is not recognized`).
-        bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
-        clauses.append(f"(IS_BOOLEAN({path}) AND {str_path} = {bool_str_lit})")
-        if float_lit is not None:
-            # Variant float `1.23` stringifies to `'1.230000000000000e+00'`-ish
-            # in Snowflake — direct string compare misses it, so a typed
-            # branch is needed. TRY_TO_DOUBLE on the string form sidesteps
-            # the same eager-eval trap as the bool branch.
-            clauses.append(
-                f"((IS_DECIMAL({path}) OR IS_DOUBLE({path}))"
-                f" AND TRY_TO_DOUBLE({str_path}) = {float_lit})"
-            )
-        return "(" + " OR ".join(clauses) + ")"
-
-    # NOT_EQUAL: per-type dispatch.
-    no_match = "FALSE"  # engine returns False on cast failure
-    bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
-    bool_branch = f"{str_path} <> {bool_str_lit}"
-    int_branch = f"({path})::NUMBER <> {int_lit}" if int_lit is not None else no_match
-    float_branch = f"({path})::FLOAT <> {float_lit}" if float_lit is not None else no_match
-    return (
-        f"((TYPEOF({path}) = 'BOOLEAN' AND {bool_branch})"
-        f" OR (TYPEOF({path}) = 'INTEGER' AND {int_branch})"
-        f" OR (TYPEOF({path}) IN ('DECIMAL', 'DOUBLE') AND {float_branch})"
-        f" OR (TYPEOF({path}) NOT IN ('BOOLEAN', 'INTEGER', 'DECIMAL', 'DOUBLE')"
-        f" AND {str_path} <> {str_lit}))"
-    )
-
-
-def _trait_typed_in(ctx: TranslateContext, path: str, value: object) -> str | None:
-    """Type-dispatched IN on a VARIANT trait, mirroring engine semantics:
-    int trait stringifies and looks up against the parsed string set; string
-    trait does direct lookup; other types never match.
-
-    Collapsed to a single `TYPEOF` gate around one string IN compare —
-    Snowflake stringifies INTEGER variants without decimals, so the same
-    `(path)::STRING IN (...)` works for both VARCHAR and INTEGER."""
-    items = _engine_in_values(value)
-    if items is None:
-        return None
-    item_lits = ",".join(string_literal(v) for v in items)
-    str_path = ctx.dialect.cast_string(path)
-    return f"(TYPEOF({path}) IN ('VARCHAR', 'INTEGER') AND {str_path} IN ({item_lits}))"
-
-
 def _comparison(
     ctx: TranslateContext,
     op: str,
@@ -376,8 +294,9 @@ def _comparison(
 ) -> str | None:
     """Emit a SQL fragment comparing `expr` against `value` per `op`.
 
-    Used for both trait columns (VARIANT, cast as needed) and JSONPath
-    references (already-typed columns or string literals). Returns `None`
+    Used for both trait references (cast via the dialect as needed) and
+    JSONPath references (already-typed columns or string literals).
+    Returns `None`
     only for genuinely-untranslatable inputs (e.g. RE2-unsafe regex);
     inputs the engine evaluates to a deterministic False (missing value,
     non-numeric operand on a comparator) compile to `"FALSE"`.
@@ -523,7 +442,9 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     # syntax parsing failed — engine treats the latter as a literal trait
     # key. Fall through to the trait branch.
 
-    # Trait-bound predicates → VARIANT path-extraction on i.traits:"<key>".
+    # Trait-bound predicates: the dialect knows how to extract traits from
+    # whatever shape it stores them in (Snowflake's VARIANT column today,
+    # Postgres JSONB or a long-form table tomorrow).
     path = ctx.trait_path(prop)
     if op == "IS_SET":
         return f"{path} IS NOT NULL"
@@ -552,16 +473,19 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             f"{_semver_sort_key_expr(ctx, bare_lit)})"
         )
 
-    # Type-aware comparators on VARIANT traits — mirror flag_engine's
-    # per-type coercion of the segment value before compare.
+    # Type-aware comparators on traits — delegate to the dialect, since the
+    # discriminator (TYPEOF / IS_*), runtime type-coercion casts, and
+    # short-circuit pitfalls are all engine-specific.
     if op in {"EQUAL", "NOT_EQUAL"} and val is not None:
         negate = op == "NOT_EQUAL"
-        return f"({path} IS NOT NULL AND {_trait_typed_eq(ctx, path, val, negate=negate)})"
+        eq_pred = ctx.dialect.trait_eq(ctx.identities_alias, prop, val, negate=negate)
+        return f"({path} IS NOT NULL AND {eq_pred})"
     if op == "IN":
-        in_pred = _trait_typed_in(ctx, path, val)
-        if in_pred is None:
+        items = _engine_in_values(val)
+        if items is None:
             # Bad IN value (non-string, non-list) — engine returns False.
             return "FALSE"
+        in_pred = ctx.dialect.trait_in(ctx.identities_alias, prop, items)
         return f"({path} IS NOT NULL AND {in_pred})"
 
     return _comparison(ctx, op, path, val, is_jsonpath=False)

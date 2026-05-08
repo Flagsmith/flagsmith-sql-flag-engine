@@ -39,6 +39,8 @@ extraction. Different operation, different perf.
 
 from __future__ import annotations
 
+from flagsmith_sql_flag_engine.utils import string_literal
+
 # Canonical schema the translator expects. Run this once when standing up
 # a Snowflake-backed Flagsmith installation; the CDC pipeline that
 # materialises IDENTITIES from the source-of-truth feed populates the
@@ -88,6 +90,70 @@ class SnowflakeDialect:
         # the SQL standard.
         escaped = trait_key.replace('"', '""')
         return f'{alias}.traits:"{escaped}"'
+
+    def trait_eq(self, alias: str, trait_key: str, value: object, negate: bool) -> str:
+        path = self.trait_path(alias, trait_key)
+        str_path = self.cast_string(path)
+        str_value = str(value)
+        str_lit = string_literal(str_value)
+        # Engine bool cast: `lambda v: v not in ("False", "false")`. We compare
+        # against the variant's `::STRING` form ('true'/'false') rather than
+        # invoke `(...)::BOOLEAN` directly — Snowflake's optimiser eagerly
+        # evaluates the BOOLEAN cast even when the IS_BOOLEAN guard would
+        # have short-circuited, and a non-bool variant blows up the query
+        # (`100037: Boolean value 'red' is not recognized`).
+        bool_str_lit = "'false'" if str_value in ("False", "false") else "'true'"
+        # Engine int/float cast: int(v) / float(v); ValueError → no match.
+        try:
+            int_lit: str | None = str(int(str_value))
+        except (ValueError, TypeError):
+            int_lit = None
+        try:
+            float_lit: str | None = repr(float(str_value))
+        except (ValueError, TypeError):
+            float_lit = None
+
+        if not negate:
+            # Fast string compare always present — handles VARCHAR traits and
+            # canonically-stringified INTEGER traits in one cheap branch.
+            clauses = [f"{str_path} = {str_lit}"]
+            clauses.append(f"(IS_BOOLEAN({path}) AND {str_path} = {bool_str_lit})")
+            if float_lit is not None:
+                # Variant float `1.23` stringifies to `'1.230000000000000e+00'`-ish
+                # in Snowflake — direct string compare misses it, so a typed
+                # branch is needed. TRY_TO_DOUBLE on the string form sidesteps
+                # the same eager-eval trap as the bool branch.
+                clauses.append(
+                    f"((IS_DECIMAL({path}) OR IS_DOUBLE({path}))"
+                    f" AND TRY_TO_DOUBLE({str_path}) = {float_lit})"
+                )
+            return "(" + " OR ".join(clauses) + ")"
+
+        # NOT_EQUAL: per-type dispatch — engine returns True only when the
+        # cast succeeded *and* values differ, which an OR-of-positives
+        # can't express without over-matching.
+        no_match = "FALSE"  # engine returns False on cast failure
+        bool_branch = f"{str_path} <> {bool_str_lit}"
+        int_branch = f"({path})::NUMBER <> {int_lit}" if int_lit is not None else no_match
+        float_branch = f"({path})::FLOAT <> {float_lit}" if float_lit is not None else no_match
+        return (
+            f"((TYPEOF({path}) = 'BOOLEAN' AND {bool_branch})"
+            f" OR (TYPEOF({path}) = 'INTEGER' AND {int_branch})"
+            f" OR (TYPEOF({path}) IN ('DECIMAL', 'DOUBLE') AND {float_branch})"
+            f" OR (TYPEOF({path}) NOT IN ('BOOLEAN', 'INTEGER', 'DECIMAL', 'DOUBLE')"
+            f" AND {str_path} <> {str_lit}))"
+        )
+
+    def trait_in(self, alias: str, trait_key: str, items: list[str]) -> str:
+        # Collapsed to a single `TYPEOF` gate around one string IN compare —
+        # Snowflake stringifies INTEGER variants without decimals, so the same
+        # `(path)::STRING IN (...)` works for both VARCHAR and INTEGER. Bool /
+        # float / array traits never match per engine semantics, so they fall
+        # outside the gate.
+        path = self.trait_path(alias, trait_key)
+        str_path = self.cast_string(path)
+        item_lits = ",".join(string_literal(v) for v in items)
+        return f"(TYPEOF({path}) IN ('VARCHAR', 'INTEGER') AND {str_path} IN ({item_lits}))"
 
     # ----- string operations -----
 
