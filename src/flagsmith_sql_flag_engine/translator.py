@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal, NamedTuple
 
 import jsonpath_rfc9535
 from flag_engine.context.types import (
@@ -200,9 +201,21 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _classify_jsonpath(
-    prop: str,
-) -> tuple[str, ...] | None:
+JsonpathKind = Literal["identifier", "key", "trait", "untranslatable", "static"]
+
+
+class JsonpathClassification(NamedTuple):
+    """What a JSONPath property resolves to in the SQL setting.
+
+    `kind` selects the shape; `trait_key` carries the trait name only when
+    `kind == "trait"`.
+    """
+
+    kind: JsonpathKind
+    trait_key: str | None = None
+
+
+def _classify_jsonpath(prop: str) -> JsonpathClassification:
     """Classify a JSONPath property by what it resolves to in the SQL setting.
 
     Identity is per-row in our query model (each `IDENTITIES` row IS an
@@ -211,19 +224,14 @@ def _classify_jsonpath(
     to a row reference, not be statically pre-computed against the eval
     context.
 
-    Returns one of:
-      - `("identifier",)`     — `$.identity.identifier` (any syntax)
-      - `("key",)`            — `$.identity.key` (any syntax)
-      - `("trait", "<key>")`  — `$.identity.traits.<key>` (any syntax)
-      - `("untranslatable",)` — under `$.identity` but doesn't map to row state
-      - `("static",)`         — non-identity (env, feature, etc.); pre-computable
-      - `None`                — not valid JSONPath syntax; caller falls back to
-                                a literal trait-key lookup, mirroring the engine
+    A `prop` that doesn't parse as JSONPath is classified as a `("trait",
+    prop)` — the engine treats unparseable `$.`-prefixed properties as
+    literal trait keys, and we mirror that.
     """
     try:
         compiled = jsonpath_rfc9535.compile(prop)
     except jsonpath_rfc9535.JSONPathSyntaxError:
-        return None
+        return JsonpathClassification("trait", prop)
     names: list[str] = []
     for s in compiled.segments:
         if len(s.selectors) != 1:  # pragma: no cover - multi-selector segments not in dataset
@@ -238,19 +246,19 @@ def _classify_jsonpath(
                 # `$.identity` — the whole identity object. Operators that
                 # take a scalar fail-cast on a dict and the engine returns
                 # False; static eval gives the same per-row answer.
-                return ("static",)
+                return JsonpathClassification("static")
             if len(names) == 2 and names[1] == "identifier":
-                return ("identifier",)
+                return JsonpathClassification("identifier")
             if len(names) == 2 and names[1] == "key":
-                return ("key",)
+                return JsonpathClassification("key")
             if len(names) == 3 and names[1] == "traits":
-                return ("trait", names[2])
-            return ("untranslatable",)
+                return JsonpathClassification("trait", names[2])
+            return JsonpathClassification("untranslatable")
     if names and names[0] == "identity":
         # Identity path with non-name selectors (wildcards, filters, etc.) —
         # we can't map those to fixed row references.
-        return ("untranslatable",)
-    return ("static",)
+        return JsonpathClassification("untranslatable")
+    return JsonpathClassification("static")
 
 
 def _engine_static_verdict(ctx: TranslateContext, cond: SegmentCondition) -> str:
@@ -361,16 +369,18 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     prop = cond.get("property") or ""
     val = cond.get("value")
 
-    # Classify any JSONPath-shaped property up front. Identity-bound paths
+    # Classify the property up front. Identity-bound JSONPaths
     # (`$.identity.identifier`, `$.identity.key`, `$.identity.traits.<x>`) map
-    # to row references; non-identity paths are eval-ctx-bound (constant for
-    # every row) and get pre-computed; bad JSONPath syntax falls back to a
-    # literal trait-key lookup, mirroring the engine.
-    classification: tuple[str, ...] | None = None
-    if prop.startswith("$"):
-        classification = _classify_jsonpath(prop)
-        if classification and classification[0] == "trait":
-            prop = classification[1]  # rewrite to bare trait key for downstream
+    # to row references; non-identity JSONPaths are eval-ctx-bound (constant
+    # for every row) and get pre-computed via the engine. Anything that
+    # doesn't parse as JSONPath — including bare trait keys with no `$`
+    # prefix and empty strings — comes back as `("trait", prop)`.
+    classification = _classify_jsonpath(prop)
+    if classification.kind == "trait":
+        # Trait keys carried via `$.identity.traits.<x>` arrive normalised
+        # to the bare key; literal trait keys come through untouched.
+        assert classification.trait_key is not None
+        prop = classification.trait_key
 
     # PERCENTAGE_SPLIT — inline pure-SQL hash, no UDF.
     if op == "PERCENTAGE_SPLIT":
@@ -386,6 +396,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             return "FALSE"
         threshold = float(threshold_lit)
         identity: dict[str, object] = ctx.evaluation_context.get("identity") or {}  # type: ignore[assignment]
+        kind = classification.kind
         if not prop:
             # Implicit `$.identity.key` — engine returns False when no
             # identity, or when the identity lacks `key` (the engine never
@@ -393,18 +404,18 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             if not identity.get("key"):
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
-        elif classification == ("key",):
+        elif kind == "key":
             if not identity.get("key"):
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.key"))
-        elif classification == ("identifier",):
+        elif kind == "identifier":
             if not identity.get("identifier"):
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.identifier"))
-        elif classification == ("untranslatable",):
+        elif kind == "untranslatable":
             # `$.identity.<X>` we don't represent in the row schema.
             return None
-        elif classification == ("static",):
+        elif kind == "static":
             # Non-identity JSONPath: the engine hashes the resolved value.
             # We'd need to bake it as a literal hash subject — leave for
             # future work and let the caller fall back to the engine.
@@ -423,24 +434,23 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         # nothing, the comparator's cast fails, returns False.
         return "FALSE"
 
-    if classification in (("identifier",), ("key",)):
+    if classification.kind in ("identifier", "key"):
         path = ctx.jsonpath_expr(
-            "$.identity.identifier" if classification == ("identifier",) else "$.identity.key"
+            "$.identity.identifier" if classification.kind == "identifier" else "$.identity.key"
         )
         if op == "IS_SET":
             return "TRUE"
         if op == "IS_NOT_SET":
             return "FALSE"
         return _comparison(ctx, op, path, val, is_jsonpath=True)
-    if classification == ("untranslatable",):
+    if classification.kind == "untranslatable":
         # Identity-bound JSONPath we can't map to row state — caller falls
         # back to the engine.
         return None
-    if classification == ("static",):
+    if classification.kind == "static":
         return _engine_static_verdict(ctx, cond)
-    # Either no JSONPath prefix, or `prop` started with `$` but JSONPath
-    # syntax parsing failed — engine treats the latter as a literal trait
-    # key. Fall through to the trait branch.
+    # `kind == "trait"` — fall through to the trait branch below with
+    # `prop` already rewritten to the bare trait key.
 
     # Trait-bound predicates: the dialect knows how to extract traits from
     # whatever shape it stores them in (Snowflake's VARIANT column today,
