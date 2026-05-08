@@ -555,6 +555,8 @@ def test_translate_segment__percentage_split_trait_not_in_context__compiles_to_f
 
 
 def test_translate_segment__is_set_on_identity_identifier__emits_true() -> None:
+    # Given an IS_SET on $.identity.identifier — every IDENTITIES row IS an
+    # identity, so the predicate is unconditionally true
     seg = {
         "key": "j1",
         "name": "s",
@@ -567,10 +569,13 @@ def test_translate_segment__is_set_on_identity_identifier__emits_true() -> None:
             }
         ],
     }
+
+    # When / Then the predicate collapses to TRUE
     assert translate_segment(seg, _ctx()) == "((TRUE))"
 
 
 def test_translate_segment__is_not_set_on_identity_key__emits_false() -> None:
+    # Given an IS_NOT_SET on $.identity.key — same as above, inverted
     seg = {
         "key": "j2",
         "name": "s",
@@ -583,10 +588,13 @@ def test_translate_segment__is_not_set_on_identity_key__emits_false() -> None:
             }
         ],
     }
+
+    # When / Then the predicate collapses to FALSE
     assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 def test_translate_segment__not_equal_on_identity_identifier__emits_inequality() -> None:
+    # Given a NOT_EQUAL against the identifier column
     seg = {
         "key": "j3",
         "name": "s",
@@ -599,12 +607,17 @@ def test_translate_segment__not_equal_on_identity_identifier__emits_inequality()
             }
         ],
     }
+
+    # When translated
     sql = translate_segment(seg, _ctx())
+
+    # Then the predicate is a direct column inequality compare
     assert sql is not None
     assert "i.identifier <> 'ada'" in sql
 
 
 def test_translate_segment__contains_on_identity_identifier__uses_position() -> None:
+    # Given a CONTAINS on the identifier column
     seg = {
         "key": "j4",
         "name": "s",
@@ -617,12 +630,17 @@ def test_translate_segment__contains_on_identity_identifier__uses_position() -> 
             }
         ],
     }
+
+    # When translated
     sql = translate_segment(seg, _ctx())
+
+    # Then the predicate uses POSITION on the identifier column
     assert sql is not None
     assert "POSITION('@', i.identifier) > 0" in sql
 
 
 def test_translate_segment__not_contains_on_identity_identifier__inverts_position() -> None:
+    # Given a NOT_CONTAINS on the identifier column
     seg = {
         "key": "j5",
         "name": "s",
@@ -635,7 +653,11 @@ def test_translate_segment__not_contains_on_identity_identifier__inverts_positio
             }
         ],
     }
+
+    # When translated
     sql = translate_segment(seg, _ctx())
+
+    # Then the predicate is the inverse of POSITION, with a not-null guard
     assert sql is not None
     assert "IS NOT NULL AND NOT" in sql
     assert "POSITION('@', i.identifier) > 0" in sql
@@ -687,6 +709,7 @@ def test_translate_segment__rule_with_untranslatable_nested_rule__returns_none()
 
 
 def test_translate_segment__none_rule_type__inverts_predicate() -> None:
+    # Given a NONE rule (matches when no condition matches)
     seg = {
         "key": "r3",
         "name": "s",
@@ -697,7 +720,11 @@ def test_translate_segment__none_rule_type__inverts_predicate() -> None:
             }
         ],
     }
+
+    # When translated
     sql = translate_segment(seg, _ctx())
+
+    # Then the rule is wrapped in a NOT
     assert sql is not None
     assert sql.startswith("(NOT (") or "NOT (" in sql
 
@@ -718,6 +745,9 @@ def test_translate_segment__unknown_rule_type__raises() -> None:
             }
         ],
     }
+
+    # When translation is attempted
+    # Then the assert fires loudly rather than returning a wrong-but-quiet answer
     with pytest.raises(AssertionError):
         translate_segment(seg, _ctx())
 
