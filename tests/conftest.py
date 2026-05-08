@@ -51,16 +51,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
 
 
-_REQUIRED_ENV = ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PRIVATE_KEY_PATH")
-
-
 @pytest.fixture(scope="session")
 def snowflake_session() -> Iterator[Session]:
     """Snowpark session keyed off SNOWFLAKE_* env vars. Session-scoped."""
-    missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
-    if missing:
-        pytest.skip(f"required env vars not set: {', '.join(missing)}")
-
     config: dict[str, str] = {
         "account": os.environ["SNOWFLAKE_ACCOUNT"],
         "user": os.environ["SNOWFLAKE_USER"],
@@ -78,8 +71,8 @@ def snowflake_session() -> Iterator[Session]:
 
 
 @pytest.fixture(scope="session")
-def parity_table(snowflake_session: Any) -> Iterator[str]:
-    """Create a per-run scratch IDENTITIES table mirroring
+def snowflake_identity_table(snowflake_session: Session) -> Iterator[str]:
+    """A scratch IDENTITIES table mirroring
     `SnowflakeDialect.SCHEMA_DDL`. Returns the fully-qualified name."""
     suffix = uuid.uuid4().hex[:8]
     db = os.environ.get("SNOWFLAKE_DATABASE", "FS_TEST")
@@ -87,7 +80,7 @@ def parity_table(snowflake_session: Any) -> Iterator[str]:
     table = f"{db}.{schema}.IDENTITIES_PARITY_{suffix}"
     snowflake_session.sql(
         f"""
-        CREATE TRANSIENT TABLE {table} (
+        CREATE TEMPORARY TABLE {table} (
             environment_id STRING NOT NULL,
             id NUMBER NOT NULL,
             identifier STRING NOT NULL,
@@ -137,7 +130,7 @@ def _q(s: str) -> str:
 
 
 @pytest.fixture(scope="session")
-def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[EngineTestCase]]:
+def loaded_cases(snowflake_session: Any, snowflake_identity_table: str) -> Iterator[list[EngineTestCase]]:
     """Load every test case's identity into the scratch IDENTITIES table
     in a single multi-row INSERT. Returns the list of cases (with
     overridden `environment.key` so engine and SQL agree on what env to
@@ -168,7 +161,7 @@ def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[Eng
         overridden.append(case)
 
     snowflake_session.sql(
-        f"INSERT INTO {parity_table} (environment_id, id, identifier, identity_key, traits) "
+        f"INSERT INTO {snowflake_identity_table} (environment_id, id, identifier, identity_key, traits) "
         + "\nUNION ALL\n".join(selects)
     ).collect()
     yield overridden
@@ -177,7 +170,7 @@ def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[Eng
 @pytest.fixture(scope="session")
 def parity_results(
     snowflake_session: Any,
-    parity_table: str,
+    snowflake_identity_table: str,
     loaded_cases: list[EngineTestCase],
 ) -> dict[tuple[int, str], bool | None]:
     """Run every (case, segment) pair's translated SQL in one mega-query
@@ -206,7 +199,7 @@ def parity_results(
         env_lit = _q(env_key)
         select_clauses.append(
             f"SELECT {i} AS pair_id, "
-            f"EXISTS (SELECT 1 FROM {parity_table} i "
+            f"EXISTS (SELECT 1 FROM {snowflake_identity_table} i "
             f"WHERE i.environment_id = '{env_lit}' AND ({sql})) AS m"
         )
 
