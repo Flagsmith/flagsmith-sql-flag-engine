@@ -71,7 +71,3 @@ class DialectTestHarness(Protocol):
         `EXISTS (SELECT 1 FROM identity_table i WHERE
         i.environment_id = case.environment_key AND (case.predicate_sql))`
         (or the dialect's equivalent). Returns `pair_id -> is_match`."""
-
-
-# Re-export for callers that prefer the package path.
-__all__ = ["DialectTestHarness", "EvaluationCase", "IdentityRow", "Iterator"]

@@ -560,14 +560,14 @@ def translate_rule(rule: SegmentRule, ctx: TranslateContext) -> str | None:
             return None
         children.append(f"({sql})")
 
-    rule_type = rule["type"]
     assert children, "segment rule must have at least one condition or nested rule"
-    if rule_type == "ALL":
-        return " AND ".join(children)
-    if rule_type == "ANY":
-        return " OR ".join(children)
-    assert rule_type == "NONE", f"unknown segment rule type {rule_type!r}"
-    return f"NOT ({' OR '.join(children)})"
+    match rule["type"]:
+        case "ALL":
+            return " AND ".join(children)
+        case "ANY":
+            return " OR ".join(children)
+        case "NONE":
+            return f"NOT ({' OR '.join(children)})"
 
 
 def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | None:

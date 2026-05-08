@@ -57,4 +57,4 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 strict = true
 python_version = "3.10"
-files = ["src/flagsmith_sql_flag_engine"]
+files = ["src/flagsmith_sql_flag_engine", "tests"]

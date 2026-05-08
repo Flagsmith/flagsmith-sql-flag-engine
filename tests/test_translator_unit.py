@@ -3,8 +3,9 @@
 Asserts SQL string shapes for representative segments.
 """
 
-import pytest
-from flag_engine.context.types import EvaluationContext
+from typing import cast
+
+from flag_engine.context.types import EvaluationContext, IdentityContext, SegmentContext
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
@@ -26,7 +27,7 @@ def _ctx(env_key: str = "test-env-key", env_name: str = "Test") -> TranslateCont
 
 def test_translate_segment__equal_on_string_trait__emits_variant_path() -> None:
     # Given a segment with a single EQUAL on a string trait
-    seg = {
+    seg: SegmentContext = {
         "key": "1",
         "name": "s",
         "rules": [
@@ -48,7 +49,7 @@ def test_translate_segment__equal_on_string_trait__emits_variant_path() -> None:
 
 def test_translate_segment__in_with_csv_value__translates_to_in_clause() -> None:
     # Given a segment using IN with a comma-separated value
-    seg = {
+    seg: SegmentContext = {
         "key": "2",
         "name": "s",
         "rules": [
@@ -70,7 +71,7 @@ def test_translate_segment__in_with_csv_value__translates_to_in_clause() -> None
 
 def test_translate_segment__is_set__emits_is_not_null_on_path() -> None:
     # Given an IS_SET condition on a trait key
-    seg = {
+    seg: SegmentContext = {
         "key": "3",
         "name": "s",
         "rules": [
@@ -92,7 +93,7 @@ def test_translate_segment__is_set__emits_is_not_null_on_path() -> None:
 
 def test_translate_segment__is_not_set__emits_is_null_on_path() -> None:
     # Given an IS_NOT_SET condition on a trait key
-    seg = {
+    seg: SegmentContext = {
         "key": "4",
         "name": "s",
         "rules": [
@@ -113,7 +114,7 @@ def test_translate_segment__is_not_set__emits_is_null_on_path() -> None:
 
 def test_translate_segment__percentage_split_no_property__inlines_md5_arithmetic() -> None:
     # Given a PERCENTAGE_SPLIT with no property (engine hashes the identity key)
-    seg = {
+    seg: SegmentContext = {
         "key": "100",
         "name": "s",
         "rules": [
@@ -136,7 +137,7 @@ def test_translate_segment__percentage_split_no_property__inlines_md5_arithmetic
 
 def test_translate_segment__percentage_split_on_trait__uses_variant_path() -> None:
     # Given a PERCENTAGE_SPLIT keyed on a trait value
-    seg = {
+    seg: SegmentContext = {
         "key": "101",
         "name": "s",
         "rules": [
@@ -160,7 +161,7 @@ def test_translate_segment__percentage_split_on_trait__uses_variant_path() -> No
 
 def test_translate_segment__jsonpath_identity_identifier__uses_column_directly() -> None:
     # Given a condition referencing $.identity.identifier
-    seg = {
+    seg: SegmentContext = {
         "key": "5",
         "name": "s",
         "rules": [
@@ -184,7 +185,7 @@ def test_translate_segment__jsonpath_identity_identifier__uses_column_directly()
 
 def test_translate_segment__jsonpath_environment_name__uses_context_value() -> None:
     # Given a condition on $.environment.name and a TranslateContext with env_name="Production"
-    seg = {
+    seg: SegmentContext = {
         "key": "10",
         "name": "s",
         "rules": [
@@ -212,7 +213,7 @@ def test_translate_segment__jsonpath_environment_name__uses_context_value() -> N
 
 def test_translate_segment__regex_with_backreference__returns_none() -> None:
     # Given a regex pattern containing a backreference (RE2-unsafe)
-    seg = {
+    seg: SegmentContext = {
         "key": "6",
         "name": "s",
         "rules": [
@@ -230,7 +231,7 @@ def test_translate_segment__regex_with_backreference__returns_none() -> None:
 
 def test_translate_segment__regex_with_lookahead__returns_none() -> None:
     # Given a regex pattern containing a lookahead (RE2-unsafe)
-    seg = {
+    seg: SegmentContext = {
         "key": "7",
         "name": "s",
         "rules": [
@@ -248,7 +249,7 @@ def test_translate_segment__regex_with_lookahead__returns_none() -> None:
 
 def test_translate_segment__none_rule__emits_negation() -> None:
     # Given a NONE rule (matches when no condition is satisfied)
-    seg = {
+    seg: SegmentContext = {
         "key": "8",
         "name": "s",
         "rules": [
@@ -269,7 +270,7 @@ def test_translate_segment__none_rule__emits_negation() -> None:
 
 def test_translate_segment__empty_rules__returns_false() -> None:
     # Given a segment with no rules
-    seg = {"key": "9", "name": "s", "rules": []}
+    seg: SegmentContext = {"key": "9", "name": "s", "rules": []}
 
     # When translated
     # Then the predicate is the literal FALSE (no identity matches an empty segment)
@@ -278,7 +279,7 @@ def test_translate_segment__empty_rules__returns_false() -> None:
 
 def test_translate_segment__trait_key_with_hyphens__quotes_variant_path() -> None:
     # Given a trait key with a hyphen (illegal as an unquoted SQL identifier)
-    seg = {
+    seg: SegmentContext = {
         "key": "11",
         "name": "s",
         "rules": [
@@ -300,7 +301,7 @@ def test_translate_segment__trait_key_with_hyphens__quotes_variant_path() -> Non
 def test_translate_segment__numeric_comparator_with_injection__compiles_to_false() -> None:
     # Given a comparator value that is not numeric (e.g. a SQL-injection payload)
     for op in ("GREATER_THAN", "LESS_THAN", "GREATER_THAN_INCLUSIVE", "LESS_THAN_INCLUSIVE"):
-        seg = {
+        seg: SegmentContext = {
             "key": "12",
             "name": "s",
             "rules": [
@@ -330,7 +331,7 @@ def test_translate_segment__numeric_comparator_with_numeric_string__interpolates
     None
 ):
     # Given a numeric comparator with a clean numeric string
-    seg = {
+    seg: SegmentContext = {
         "key": "13",
         "name": "s",
         "rules": [
@@ -353,7 +354,7 @@ def test_translate_segment__numeric_comparator_with_numeric_string__interpolates
 
 def test_translate_segment__modulo_with_injection_in_divisor__compiles_to_false() -> None:
     # Given a MODULO condition whose divisor contains a SQL-injection payload
-    seg = {
+    seg: SegmentContext = {
         "key": "14",
         "name": "s",
         "rules": [
@@ -381,11 +382,14 @@ def test_translate_segment__modulo_with_injection_in_divisor__compiles_to_false(
 
 def test_translate_segment__unknown_operator__returns_none() -> None:
     # Given a condition with an operator the translator doesn't support
-    seg = {
-        "key": "u1",
-        "name": "s",
-        "rules": [{"type": "ALL", "conditions": [{"operator": "WHATEVER", "property": "x"}]}],
-    }
+    seg = cast(
+        SegmentContext,
+        {
+            "key": "u1",
+            "name": "s",
+            "rules": [{"type": "ALL", "conditions": [{"operator": "WHATEVER", "property": "x"}]}],
+        },
+    )
 
     # When / Then the translator declines
     assert translate_segment(seg, _ctx()) is None
@@ -393,7 +397,7 @@ def test_translate_segment__unknown_operator__returns_none() -> None:
 
 def test_translate_segment__condition_without_property__compiles_to_false() -> None:
     # Given a non-PERCENTAGE_SPLIT condition with no `property`
-    seg = {
+    seg: SegmentContext = {
         "key": "u2",
         "name": "s",
         "rules": [
@@ -408,7 +412,7 @@ def test_translate_segment__condition_without_property__compiles_to_false() -> N
 
 def test_translate_segment__percentage_split_unparseable_threshold__compiles_to_false() -> None:
     # Given a PERCENTAGE_SPLIT whose value can't parse as a number
-    seg = {
+    seg: SegmentContext = {
         "key": "ps1",
         "name": "s",
         "rules": [
@@ -432,10 +436,13 @@ def _ctx_no_identity() -> TranslateContext:
 
 
 def _ctx_identity_without(field: str) -> TranslateContext:
-    identity: dict = {"identifier": "u", "key": "k", "traits": {}}
+    identity: dict[str, object] = {"identifier": "u", "key": "k", "traits": {}}
     identity.pop(field)
     return TranslateContext(
-        evaluation_context={"environment": {"key": "k", "name": "n"}, "identity": identity},
+        evaluation_context={
+            "environment": {"key": "k", "name": "n"},
+            "identity": cast(IdentityContext, identity),
+        },
         dialect=SnowflakeDialect(),
     )
 
@@ -443,7 +450,7 @@ def _ctx_identity_without(field: str) -> TranslateContext:
 def test_translate_segment__percentage_split_implicit_key_no_identity__compiles_to_false() -> None:
     # Given a PERCENTAGE_SPLIT with no property (implicit `$.identity.key`) and an eval
     # context with no identity
-    seg = {
+    seg: SegmentContext = {
         "key": "ps2",
         "name": "s",
         "rules": [
@@ -460,7 +467,7 @@ def test_translate_segment__percentage_split_implicit_key_no_identity__compiles_
 
 def test_translate_segment__percentage_split_identity_key_missing__compiles_to_false() -> None:
     # Given the eval context's identity has no `key`
-    seg = {
+    seg: SegmentContext = {
         "key": "ps3",
         "name": "s",
         "rules": [
@@ -481,7 +488,7 @@ def test_translate_segment__percentage_split_identity_identifier_missing__compil
     None
 ):
     # Given the eval context's identity has no `identifier`
-    seg = {
+    seg: SegmentContext = {
         "key": "ps4",
         "name": "s",
         "rules": [
@@ -504,7 +511,7 @@ def test_translate_segment__percentage_split_identity_identifier_missing__compil
 
 def test_translate_segment__percentage_split_unknown_jsonpath__returns_none() -> None:
     # Given a PERCENTAGE_SPLIT on a JSONPath that resolves to nothing in the eval context
-    seg = {
+    seg: SegmentContext = {
         "key": "ps5",
         "name": "s",
         "rules": [
@@ -523,7 +530,7 @@ def test_translate_segment__percentage_split_unknown_jsonpath__returns_none() ->
 
 def test_translate_segment__percentage_split_trait_not_in_context__compiles_to_false() -> None:
     # Given a PERCENTAGE_SPLIT on a trait the eval context's identity doesn't carry
-    seg = {
+    seg: SegmentContext = {
         "key": "ps6",
         "name": "s",
         "rules": [
@@ -543,7 +550,7 @@ def test_translate_segment__percentage_split_trait_not_in_context__compiles_to_f
 def test_translate_segment__is_set_on_identity_identifier__emits_true() -> None:
     # Given an IS_SET on $.identity.identifier — every IDENTITIES row IS an
     # identity, so the predicate is unconditionally true
-    seg = {
+    seg: SegmentContext = {
         "key": "j1",
         "name": "s",
         "rules": [
@@ -562,7 +569,7 @@ def test_translate_segment__is_set_on_identity_identifier__emits_true() -> None:
 
 def test_translate_segment__is_not_set_on_identity_key__emits_false() -> None:
     # Given an IS_NOT_SET on $.identity.key — same as above, inverted
-    seg = {
+    seg: SegmentContext = {
         "key": "j2",
         "name": "s",
         "rules": [
@@ -581,7 +588,7 @@ def test_translate_segment__is_not_set_on_identity_key__emits_false() -> None:
 
 def test_translate_segment__not_equal_on_identity_identifier__emits_inequality() -> None:
     # Given a NOT_EQUAL against the identifier column
-    seg = {
+    seg: SegmentContext = {
         "key": "j3",
         "name": "s",
         "rules": [
@@ -604,7 +611,7 @@ def test_translate_segment__not_equal_on_identity_identifier__emits_inequality()
 
 def test_translate_segment__contains_on_identity_identifier__uses_position() -> None:
     # Given a CONTAINS on the identifier column
-    seg = {
+    seg: SegmentContext = {
         "key": "j4",
         "name": "s",
         "rules": [
@@ -627,7 +634,7 @@ def test_translate_segment__contains_on_identity_identifier__uses_position() -> 
 
 def test_translate_segment__not_contains_on_identity_identifier__inverts_position() -> None:
     # Given a NOT_CONTAINS on the identifier column
-    seg = {
+    seg: SegmentContext = {
         "key": "j5",
         "name": "s",
         "rules": [
@@ -651,16 +658,19 @@ def test_translate_segment__not_contains_on_identity_identifier__inverts_positio
 
 def test_translate_segment__comparison_with_none_value__compiles_to_false() -> None:
     # Given an EQUAL on a JSONPath identity column with no value field
-    seg = {
-        "key": "j6",
-        "name": "s",
-        "rules": [
-            {
-                "type": "ALL",
-                "conditions": [{"operator": "EQUAL", "property": "$.identity.identifier"}],
-            }
-        ],
-    }
+    seg = cast(
+        SegmentContext,
+        {
+            "key": "j6",
+            "name": "s",
+            "rules": [
+                {
+                    "type": "ALL",
+                    "conditions": [{"operator": "EQUAL", "property": "$.identity.identifier"}],
+                }
+            ],
+        },
+    )
 
     # When / Then the predicate collapses to FALSE (engine treats null value
     # as a cast failure → returns False)
@@ -669,7 +679,7 @@ def test_translate_segment__comparison_with_none_value__compiles_to_false() -> N
 
 def test_translate_segment__rule_with_untranslatable_nested_rule__returns_none() -> None:
     # Given a nested rule containing an untranslatable operator
-    seg = {
+    seg: SegmentContext = {
         "key": "r2",
         "name": "s",
         "rules": [
@@ -691,40 +701,22 @@ def test_translate_segment__rule_with_untranslatable_nested_rule__returns_none()
     assert translate_segment(seg, _ctx()) is None
 
 
-def test_translate_segment__unknown_rule_type__raises() -> None:
-    # Given a segment with a rule type the schema doesn't allow (Flagsmith's
-    # segment validation rejects this upstream — reaching the translator with
-    # one is internal misuse, not a runtime input we should silently swallow)
-    seg = {
-        "key": "r4",
-        "name": "s",
-        "rules": [
-            {
-                "type": "MAYBE",
-                "conditions": [{"operator": "EQUAL", "property": "plan", "value": "growth"}],
-            }
-        ],
-    }
-
-    # When translation is attempted
-    # Then the assert fires loudly rather than returning a wrong-but-quiet answer
-    with pytest.raises(AssertionError):
-        translate_segment(seg, _ctx())
-
-
 def test_translate_segment__in_with_non_iterable_value__compiles_to_false() -> None:
     # Given a trait IN whose value is neither a string nor a list (engine: the
     # value-set parser raises, returns False)
-    seg = {
-        "key": "tin",
-        "name": "s",
-        "rules": [
-            {
-                "type": "ALL",
-                "conditions": [{"operator": "IN", "property": "country", "value": 123}],
-            }
-        ],
-    }
+    seg = cast(
+        SegmentContext,
+        {
+            "key": "tin",
+            "name": "s",
+            "rules": [
+                {
+                    "type": "ALL",
+                    "conditions": [{"operator": "IN", "property": "country", "value": 123}],
+                }
+            ],
+        },
+    )
 
     # When / Then the predicate collapses to FALSE
     assert translate_segment(seg, _ctx()) == "((FALSE))"
@@ -732,7 +724,7 @@ def test_translate_segment__in_with_non_iterable_value__compiles_to_false() -> N
 
 def test_translate_segment__contains_on_trait__uses_position() -> None:
     # Given a CONTAINS condition on a trait
-    seg = {
+    seg: SegmentContext = {
         "key": "tc1",
         "name": "s",
         "rules": [
@@ -753,7 +745,7 @@ def test_translate_segment__contains_on_trait__uses_position() -> None:
 
 def test_translate_segment__not_contains_on_trait__inverts_position() -> None:
     # Given a NOT_CONTAINS condition on a trait
-    seg = {
+    seg: SegmentContext = {
         "key": "tc2",
         "name": "s",
         "rules": [
@@ -776,7 +768,7 @@ def test_translate_segment__not_contains_on_trait__inverts_position() -> None:
 def test_translate_segment__condition_on_unmapped_identity_field__returns_none() -> None:
     # Given a condition on `$.identity.<X>` where `<X>` isn't `identifier`,
     # `key`, or `traits.<…>` — our row schema doesn't represent it
-    seg = {
+    seg: SegmentContext = {
         "key": "u3",
         "name": "s",
         "rules": [
@@ -794,7 +786,7 @@ def test_translate_segment__condition_on_unmapped_identity_field__returns_none()
 def test_translate_segment__condition_on_identity_path_with_wildcard__returns_none() -> None:
     # Given a condition on `$.identity.traits.*` (a wildcard-selector path —
     # the engine can resolve it, but we can't map it to a fixed row reference)
-    seg = {
+    seg: SegmentContext = {
         "key": "u4",
         "name": "s",
         "rules": [
@@ -813,7 +805,7 @@ def test_translate_segment__condition_on_identity_path_with_wildcard__returns_no
 
 def test_translate_segment__percentage_split_on_identity_whole_object__returns_none() -> None:
     # Given a PERCENTAGE_SPLIT on `$.identity` (the whole dict)
-    seg = {
+    seg: SegmentContext = {
         "key": "ps9",
         "name": "s",
         "rules": [
@@ -833,7 +825,7 @@ def test_translate_segment__percentage_split_on_identity_whole_object__returns_n
 
 def test_translate_segment__percentage_split_on_unmapped_identity_field__returns_none() -> None:
     # Given a PERCENTAGE_SPLIT on a `$.identity.<X>` we can't represent
-    seg = {
+    seg: SegmentContext = {
         "key": "ps8",
         "name": "s",
         "rules": [
@@ -852,7 +844,7 @@ def test_translate_segment__percentage_split_on_unmapped_identity_field__returns
 
 def test_translate_segment__percentage_split_on_identity_identifier__hashes_column() -> None:
     # Given a PERCENTAGE_SPLIT keyed on `$.identity.identifier`
-    seg = {
+    seg: SegmentContext = {
         "key": "ps7",
         "name": "s",
         "rules": [

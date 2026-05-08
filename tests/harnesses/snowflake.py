@@ -18,7 +18,6 @@ from snowflake.snowpark import Session
 from flagsmith_sql_flag_engine.dialect import Dialect
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
 from flagsmith_sql_flag_engine.utils import escape_string
-
 from tests.harnesses._base import EvaluationCase, IdentityRow
 
 # Cases the SQL translator can't match the engine on under Snowflake;
