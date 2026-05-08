@@ -372,10 +372,12 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     # Classify the property up front. Identity-bound JSONPaths
     # (`$.identity.identifier`, `$.identity.key`, `$.identity.traits.<x>`) map
     # to row references; non-identity JSONPaths are eval-ctx-bound (constant
-    # for every row) and get pre-computed via the engine. Anything that
-    # doesn't parse as JSONPath — including bare trait keys with no `$`
-    # prefix and empty strings — comes back as `("trait", prop)`.
-    classification = _classify_jsonpath(prop)
+    # for every row) and get pre-computed via the engine. Bare trait keys
+    # bypass the JSONPath compile — they're classified as a literal trait
+    # lookup directly.
+    classification = (
+        _classify_jsonpath(prop) if prop.startswith("$") else JsonpathClassification("trait", prop)
+    )
     if classification.kind == "trait":
         # Trait keys carried via `$.identity.traits.<x>` arrive normalised
         # to the bare key; literal trait keys come through untouched.
