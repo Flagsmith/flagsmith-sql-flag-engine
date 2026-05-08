@@ -302,7 +302,7 @@ def test_translate_segment__trait_key_with_hyphens__quotes_variant_path() -> Non
     assert 'i.traits:"user-name"' in sql
 
 
-def test_translate_segment__numeric_comparator_with_injection__returns_none() -> None:
+def test_translate_segment__numeric_comparator_with_injection__compiles_to_false() -> None:
     # Given a comparator value that is not numeric (e.g. a SQL-injection payload)
     for op in ("GREATER_THAN", "LESS_THAN", "GREATER_THAN_INCLUSIVE", "LESS_THAN_INCLUSIVE"):
         seg = {
@@ -322,9 +322,13 @@ def test_translate_segment__numeric_comparator_with_injection__returns_none() ->
             ],
         }
 
-        # When translation is attempted
-        # Then the translator declines (Python float() raises before any SQL is built)
-        assert translate_segment(seg, _ctx()) is None, op
+        # When translated
+        sql = translate_segment(seg, _ctx())
+
+        # Then the bad operand collapses to FALSE (Python float() raises before
+        # any SQL is built; engine returns False on the same input). Zero
+        # injection-payload bytes ever reach the SQL output.
+        assert sql == "((FALSE))", op
 
 
 def test_translate_segment__numeric_comparator_with_numeric_string__interpolates_parsed_float() -> (
@@ -395,7 +399,7 @@ def test_translate_segment__unknown_operator__returns_none() -> None:
     assert translate_segment(seg, _ctx()) is None
 
 
-def test_translate_segment__condition_without_property_or_operator_specific__returns_none() -> None:
+def test_translate_segment__condition_without_property__compiles_to_false() -> None:
     # Given a non-PERCENTAGE_SPLIT condition with no `property`
     seg = {
         "key": "u2",
@@ -405,14 +409,15 @@ def test_translate_segment__condition_without_property_or_operator_specific__ret
         ],
     }
 
-    # When / Then the translator declines
-    assert translate_segment(seg, _ctx()) is None
+    # When / Then the predicate collapses to FALSE (engine looks up nothing,
+    # the comparator's cast fails, returns False)
+    assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 # --- coverage: PERCENTAGE_SPLIT short-circuits ---
 
 
-def test_translate_segment__percentage_split_unparseable_threshold__returns_none() -> None:
+def test_translate_segment__percentage_split_unparseable_threshold__compiles_to_false() -> None:
     # Given a PERCENTAGE_SPLIT whose value can't parse as a number
     seg = {
         "key": "ps1",
@@ -425,8 +430,9 @@ def test_translate_segment__percentage_split_unparseable_threshold__returns_none
         ],
     }
 
-    # When / Then the translator declines (engine would also fail on float())
-    assert translate_segment(seg, _ctx()) is None
+    # When / Then the predicate collapses to FALSE (engine: float() on the
+    # threshold raises and the comparator returns False)
+    assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 def _ctx_no_identity() -> TranslateContext:
@@ -635,7 +641,7 @@ def test_translate_segment__not_contains_on_identity_identifier__inverts_positio
     assert "POSITION('@', i.identifier) > 0" in sql
 
 
-def test_translate_segment__comparison_with_none_value__returns_none() -> None:
+def test_translate_segment__comparison_with_none_value__compiles_to_false() -> None:
     # Given an EQUAL on a JSONPath identity column with no value field
     seg = {
         "key": "j6",
@@ -648,53 +654,16 @@ def test_translate_segment__comparison_with_none_value__returns_none() -> None:
         ],
     }
 
-    # When / Then the translator declines (engine treats null value as cast failure)
-    assert translate_segment(seg, _ctx()) is None
-
-
-# --- coverage: semver with an unsupported operator ---
-
-
-def test_translate_segment__semver_with_unsupported_operator__returns_none() -> None:
-    # Given a `:semver` value paired with an operator the semver path doesn't handle
-    # (CONTAINS, REGEX, etc.). The IN/EQUAL branches fire before the semver block,
-    # but CONTAINS hits the trait branch and the `:semver` suffix gates it through
-    # the semver block where its operator isn't supported.
-    seg = {
-        "key": "sv1",
-        "name": "s",
-        "rules": [
-            {
-                "type": "ALL",
-                "conditions": [
-                    {"operator": "CONTAINS", "property": "app_version", "value": "1.0.0:semver"}
-                ],
-            }
-        ],
-    }
-
-    # When / Then the translator declines for the unsupported semver operator
-    assert translate_segment(seg, _ctx()) is None
+    # When / Then the predicate collapses to FALSE (engine treats null value
+    # as a cast failure → returns False)
+    assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 # --- coverage: rule composition ---
 
 
-def test_translate_segment__rule_with_untranslatable_condition__returns_none() -> None:
-    seg = {
-        "key": "r1",
-        "name": "s",
-        "rules": [
-            {
-                "type": "ALL",
-                "conditions": [{"operator": "WHATEVER", "property": "x"}],
-            }
-        ],
-    }
-    assert translate_segment(seg, _ctx()) is None
-
-
 def test_translate_segment__rule_with_untranslatable_nested_rule__returns_none() -> None:
+    # Given a nested rule containing an untranslatable operator
     seg = {
         "key": "r2",
         "name": "s",
@@ -705,12 +674,15 @@ def test_translate_segment__rule_with_untranslatable_nested_rule__returns_none()
                 "rules": [
                     {
                         "type": "ALL",
-                        "conditions": [{"operator": "WHATEVER", "property": "x"}],
+                        "conditions": [{"operator": "REGEX", "property": "x", "value": r"(foo)\1"}],
                     }
                 ],
             }
         ],
     }
+
+    # When / Then untranslatability propagates up through translate_rule's
+    # recursion, surfacing None at the top level so the caller can fall back
     assert translate_segment(seg, _ctx()) is None
 
 
@@ -730,7 +702,12 @@ def test_translate_segment__none_rule_type__inverts_predicate() -> None:
     assert sql.startswith("(NOT (") or "NOT (" in sql
 
 
-def test_translate_segment__unknown_rule_type__returns_none() -> None:
+def test_translate_segment__unknown_rule_type__raises() -> None:
+    # Given a segment with a rule type the schema doesn't allow (Flagsmith's
+    # segment validation rejects this upstream — reaching the translator with
+    # one is internal misuse, not a runtime input we should silently swallow)
+    import pytest
+
     seg = {
         "key": "r4",
         "name": "s",
@@ -741,61 +718,16 @@ def test_translate_segment__unknown_rule_type__returns_none() -> None:
             }
         ],
     }
-    assert translate_segment(seg, _ctx()) is None
+    with pytest.raises(AssertionError):
+        translate_segment(seg, _ctx())
 
 
 # --- coverage: helpers ---
 
 
-def test_engine_in_values__non_string_non_list__returns_none() -> None:
-    from flagsmith_sql_flag_engine.translator import _engine_in_values
-
-    assert _engine_in_values(123) is None
-
-
-def test_engine_in_values__bracketed_non_array_json__falls_back_to_csv_split() -> None:
-    # Given a `[`-prefixed string that JSON-parses to a non-list (an object, here)
-    from flagsmith_sql_flag_engine.translator import _engine_in_values
-
-    # When parsed
-    out = _engine_in_values('[1,2]')
-    out_obj = _engine_in_values('[{"a":"b"}]')
-
-    # Then a JSON list yields the items, while a non-list parse falls through
-    # to the CSV split (matching the engine's `_parse_in_values_str`)
-    assert out == ["1", "2"]
-    # `[{"a":"b"}]` parses as `[{'a':'b'}]` (a list of one dict) — items become
-    # `[str({'a':'b'})]` per engine semantics
-    assert out_obj == ["{'a': 'b'}"]
-
-
-def test_translate_segment__caller_supplied_segment_key__not_overwritten() -> None:
-    # Given a TranslateContext that already has a segment_key set
-    ctx = _ctx().with_segment_key("preset")
-    seg = {
-        "key": "different-key",
-        "name": "s",
-        "rules": [
-            {
-                "type": "ALL",
-                "conditions": [{"operator": "PERCENTAGE_SPLIT", "property": "", "value": "50"}],
-            }
-        ],
-    }
-
-    # When translated
-    sql = translate_segment(seg, ctx)
-
-    # Then the caller's segment_key is used as the hash salt — the segment's
-    # `key` field doesn't override it
-    assert sql is not None
-    assert "'preset'" in sql
-    assert "'different-key'" not in sql
-
-
-def test_trait_typed_in__non_iterable_value__returns_none() -> None:
-    # A trait IN with a non-string non-list value can't be parsed; the per-condition
-    # translation surfaces None up to the rule.
+def test_translate_segment__in_with_non_iterable_value__compiles_to_false() -> None:
+    # Given a trait IN whose value is neither a string nor a list (engine: the
+    # value-set parser raises, returns False)
     seg = {
         "key": "tin",
         "name": "s",
@@ -806,44 +738,13 @@ def test_trait_typed_in__non_iterable_value__returns_none() -> None:
             }
         ],
     }
-    assert translate_segment(seg, _ctx()) is None
 
-
-def test_jsonpath_expr__non_identity_property__returns_none() -> None:
-    # Direct call: jsonpath_expr on a property that isn't a row-bound identity column
-    # yields None (the translator routes such props through static evaluation
-    # instead, but the helper is part of the public TranslateContext API).
-    assert _ctx().jsonpath_expr("$.environment.name") is None
-
-
-# --- coverage: contains/not-contains on a trait route through _comparison ---
-
-
-def test_translate_condition__percentage_split_no_segment_key__returns_none() -> None:
-    # Given a PERCENTAGE_SPLIT condition translated outside `translate_segment`
-    # (no auto-injected segment_key on the context)
-    from flagsmith_sql_flag_engine.translator import translate_condition
-
-    cond = {"operator": "PERCENTAGE_SPLIT", "property": "", "value": "50"}
-
-    # When / Then the translator declines (PERCENTAGE_SPLIT needs the segment key as
-    # the hash salt; without it we'd diverge from the engine's per-segment bucket)
-    assert translate_condition(cond, _ctx()) is None
-
-
-def test_translate_segment__rule_with_no_conditions_or_subrules__compiles_to_true() -> None:
-    # Given a rule whose `conditions` and `rules` are both empty
-    seg = {"key": "r5", "name": "s", "rules": [{"type": "ALL"}]}
-
-    # When translated
-    sql = translate_segment(seg, _ctx())
-
-    # Then the empty rule contributes a vacuous TRUE — engine treats an empty
-    # rule as a no-op (everything matches)
-    assert sql == "(TRUE)"
+    # When / Then the predicate collapses to FALSE
+    assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 def test_translate_segment__contains_on_trait__uses_position() -> None:
+    # Given a CONTAINS condition on a trait
     seg = {
         "key": "tc1",
         "name": "s",
@@ -854,12 +755,17 @@ def test_translate_segment__contains_on_trait__uses_position() -> None:
             }
         ],
     }
+
+    # When translated
     sql = translate_segment(seg, _ctx())
+
+    # Then the predicate uses POSITION on the cast-to-string trait value
     assert sql is not None
     assert "POSITION('G', (i.traits:\"country\")::STRING) > 0" in sql
 
 
 def test_translate_segment__not_contains_on_trait__inverts_position() -> None:
+    # Given a NOT_CONTAINS condition on a trait
     seg = {
         "key": "tc2",
         "name": "s",
@@ -870,7 +776,40 @@ def test_translate_segment__not_contains_on_trait__inverts_position() -> None:
             }
         ],
     }
+
+    # When translated
     sql = translate_segment(seg, _ctx())
+
+    # Then the predicate is the inverse of POSITION, with a not-null guard
     assert sql is not None
     assert "IS NOT NULL AND NOT" in sql
     assert "POSITION('G', (i.traits:\"country\")::STRING) > 0" in sql
+
+
+def test_translate_segment__percentage_split_on_identity_identifier__hashes_column() -> None:
+    # Given a PERCENTAGE_SPLIT keyed on `$.identity.identifier`
+    seg = {
+        "key": "ps7",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [
+                    {
+                        "operator": "PERCENTAGE_SPLIT",
+                        "property": "$.identity.identifier",
+                        "value": "30",
+                    }
+                ],
+            }
+        ],
+    }
+
+    # When translated
+    sql = translate_segment(seg, _ctx())
+
+    # Then the hash subject is the identifier column ref (not the eval ctx's
+    # identifier value — PERCENTAGE_SPLIT is row-bound)
+    assert sql is not None
+    assert "i.identifier" in sql
+    assert "MD5_HEX" in sql

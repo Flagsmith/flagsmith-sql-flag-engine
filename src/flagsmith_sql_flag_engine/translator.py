@@ -128,15 +128,18 @@ class TranslateContext:
         """Dialect-specific path-extraction for a trait value."""
         return self.dialect.trait_path(self.identities_alias, trait_key)
 
-    def jsonpath_expr(self, prop: str) -> str | None:
+    def jsonpath_expr(self, prop: str) -> str:
         # Only the row-bound identity columns need an SQL expression — every
         # other JSONPath property is resolved against the eval context up in
-        # `translate_condition` via `_engine_static_verdict`.
+        # `translate_condition` via `_engine_static_verdict`. Callers must
+        # gate on the property being one of the two identity columns.
         if prop == "$.identity.identifier":
             return self.dialect.identifier_expr(self.identities_alias)
         if prop == "$.identity.key":
             return self.dialect.identity_key_expr(self.identities_alias)
-        return None
+        raise AssertionError(  # pragma: no cover - internal-misuse guard
+            f"jsonpath_expr called with non-identity property: {prop!r}"
+        )
 
     def with_segment_key(self, key: str) -> TranslateContext:
         return TranslateContext(
@@ -205,13 +208,7 @@ def _engine_static_verdict(ctx: TranslateContext, cond: SegmentCondition) -> str
         "name": "_static",
         "rules": [{"type": "ALL", "conditions": [cond]}],
     }
-    try:
-        matches = is_context_in_segment(ctx.evaluation_context, fake_segment)
-    except Exception:  # pragma: no cover - defensive: engine catches its own errors
-        # If anything escapes the engine (mismatched type, unknown operator),
-        # default to "no match" so the surrounding rule composition still
-        # produces sensible SQL.
-        return "FALSE"
+    matches = is_context_in_segment(ctx.evaluation_context, fake_segment)
     return "TRUE" if matches else "FALSE"
 
 
@@ -327,10 +324,13 @@ def _comparison(
     """Emit a SQL fragment comparing `expr` against `value` per `op`.
 
     Used for both trait columns (VARIANT, cast as needed) and JSONPath
-    references (already-typed columns or string literals).
+    references (already-typed columns or string literals). Returns `None`
+    only for genuinely-untranslatable inputs (e.g. RE2-unsafe regex);
+    inputs the engine evaluates to a deterministic False (missing value,
+    non-numeric operand on a comparator) compile to `"FALSE"`.
     """
     if value is None:
-        return None
+        return "FALSE"
     d = ctx.dialect
     lit = string_literal(str(value))
     str_expr = expr if is_jsonpath else d.cast_string(expr)
@@ -348,7 +348,8 @@ def _comparison(
     if op in {"GREATER_THAN", "LESS_THAN", "GREATER_THAN_INCLUSIVE", "LESS_THAN_INCLUSIVE"}:
         numeric_lit = numeric_literal(value)
         if numeric_lit is None:
-            return None
+            # Engine: float() on a non-numeric operand raises → returns False.
+            return "FALSE"
         sql_op = {
             "GREATER_THAN": ">",
             "LESS_THAN": "<",
@@ -370,7 +371,9 @@ def _comparison(
         if not _regex_safe_for_re2(pattern):
             return None
         return f"({expr} IS NOT NULL AND {d.regexp_anchored_match(str_expr, pattern)})"
-    return None  # pragma: no cover - all TRANSLATABLE_OPERATORS handled above
+    raise AssertionError(  # pragma: no cover - all TRANSLATABLE_OPERATORS handled above
+        f"unhandled translatable operator in _comparison: {op}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -388,11 +391,16 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
 
     # PERCENTAGE_SPLIT — inline pure-SQL hash, no UDF.
     if op == "PERCENTAGE_SPLIT":
-        if not ctx.segment_key:
-            return None
+        # `translate_segment` always injects `segment_key` from the segment
+        # before recursing; reaching here without one means a caller invoked
+        # `translate_condition` directly with a half-formed context.
+        assert ctx.segment_key is not None, (
+            "PERCENTAGE_SPLIT requires a segment_key as the hash salt"
+        )
         threshold_lit = numeric_literal(val)
         if threshold_lit is None:
-            return None
+            # Engine: float() on the threshold raises → returns False.
+            return "FALSE"
         threshold = float(threshold_lit)
         identity: dict[str, object] = ctx.evaluation_context.get("identity") or {}  # type: ignore[assignment]
         if not prop:
@@ -402,17 +410,21 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             if not identity.get("key"):
                 return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
+        elif prop == "$.identity.key":
+            if not identity.get("key"):
+                return "FALSE"
+            value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr(prop))
+        elif prop == "$.identity.identifier":
+            if not identity.get("identifier"):
+                return "FALSE"
+            value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr(prop))
         elif prop.startswith("$."):
-            # Identity-bound jsonpath against an absent value → engine
-            # treats the looked-up value as None and PERCENTAGE_SPLIT bails.
-            if prop == "$.identity.key" and not identity.get("key"):
-                return "FALSE"
-            if prop == "$.identity.identifier" and not identity.get("identifier"):
-                return "FALSE"
-            jp = ctx.jsonpath_expr(prop)
-            if jp is None:
-                return None
-            value_expr = ctx.dialect.cast_string(jp)
+            # Non-identity JSONPath: the engine resolves it against the eval
+            # context. If unresolvable or not a primitive, engine returns
+            # False; otherwise we'd need to bake the resolved value as a
+            # literal hash subject — leave that as future work and let the
+            # caller fall back to the engine for now.
+            return None
         else:
             traits = identity.get("traits") or {}
             if not isinstance(traits, dict) or prop not in traits:
@@ -421,31 +433,29 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         return _percentage_split_expr(ctx, ctx.segment_key, value_expr, threshold)
 
     if not prop:
-        return None
+        # Non-PERCENTAGE_SPLIT condition without a property — engine looks up
+        # nothing, the comparator's cast fails, returns False.
+        return "FALSE"
 
     # JSONPath properties: row-bound identity columns stay as column refs;
     # everything else resolves against the eval context (constant for every
     # row in the query) and gets pre-computed via the engine. Properties
     # that start with `$.` but don't parse as JSONPath fall back to a trait
     # lookup with `prop` used verbatim as the key — same as the engine.
-    if prop.startswith("$.") and prop not in ("$.identity.identifier", "$.identity.key"):
+    if prop in ("$.identity.identifier", "$.identity.key"):
+        path = ctx.jsonpath_expr(prop)
+        if op == "IS_SET":
+            return "TRUE"
+        if op == "IS_NOT_SET":
+            return "FALSE"
+        return _comparison(ctx, op, path, val, is_jsonpath=True)
+    if prop.startswith("$."):
         try:
             jsonpath_rfc9535.compile(prop)
         except jsonpath_rfc9535.JSONPathSyntaxError:
             pass  # treat as trait key — fall through to trait branch
         else:
             return _engine_static_verdict(ctx, cond)
-    elif prop.startswith("$."):
-        path = ctx.jsonpath_expr(prop)
-        if (
-            path is None
-        ):  # pragma: no cover - elif reaches here only for identity cols, which always resolve
-            return None
-        if op == "IS_SET":
-            return "TRUE"
-        if op == "IS_NOT_SET":
-            return "FALSE"
-        return _comparison(ctx, op, path, val, is_jsonpath=True)
 
     # Trait-bound predicates → VARIANT path-extraction on i.traits:"<key>".
     path = ctx.trait_path(prop)
@@ -454,31 +464,25 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     if op == "IS_NOT_SET":
         return f"{path} IS NULL"
 
-    # Semver-marked comparator (segment value ends with `:semver`).
-    if isinstance(val, str) and val.endswith(":semver"):
-        if op not in {
-            "EQUAL",
-            "NOT_EQUAL",
-            "GREATER_THAN",
-            "LESS_THAN",
-            "GREATER_THAN_INCLUSIVE",
-            "LESS_THAN_INCLUSIVE",
-        }:
-            return None
+    # Semver-marked comparator (segment value ends with `:semver`). Engine
+    # only invokes its semver path for the comparators below; other operators
+    # treat the `:semver` suffix as ordinary string content, which is what
+    # the fall-through handlers already do.
+    _SEMVER_OPS = {
+        "EQUAL": "=",
+        "NOT_EQUAL": "<>",
+        "GREATER_THAN": ">",
+        "LESS_THAN": "<",
+        "GREATER_THAN_INCLUSIVE": ">=",
+        "LESS_THAN_INCLUSIVE": "<=",
+    }
+    if isinstance(val, str) and val.endswith(":semver") and op in _SEMVER_OPS:
         bare = val[:-7]
-        sql_op = {
-            "EQUAL": "=",
-            "NOT_EQUAL": "<>",
-            "GREATER_THAN": ">",
-            "LESS_THAN": "<",
-            "GREATER_THAN_INCLUSIVE": ">=",
-            "LESS_THAN_INCLUSIVE": "<=",
-        }[op]
         bare_lit = string_literal(bare)
         col_str = ctx.dialect.cast_string(path)
         return (
             f"({path} IS NOT NULL AND "
-            f"{_semver_sort_key_expr(ctx, col_str)} {sql_op} "
+            f"{_semver_sort_key_expr(ctx, col_str)} {_SEMVER_OPS[op]} "
             f"{_semver_sort_key_expr(ctx, bare_lit)})"
         )
 
@@ -490,7 +494,8 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     if op == "IN":
         in_pred = _trait_typed_in(ctx, path, val)
         if in_pred is None:
-            return None
+            # Bad IN value (non-string, non-list) — engine returns False.
+            return "FALSE"
         return f"({path} IS NOT NULL AND {in_pred})"
 
     return _comparison(ctx, op, path, val, is_jsonpath=False)
@@ -515,15 +520,13 @@ def translate_rule(rule: SegmentRule, ctx: TranslateContext) -> str | None:
         children.append(f"({sql})")
 
     rule_type = rule["type"]
-    if not children:
-        return "TRUE"
+    assert children, "segment rule must have at least one condition or nested rule"
     if rule_type == "ALL":
         return " AND ".join(children)
     if rule_type == "ANY":
         return " OR ".join(children)
-    if rule_type == "NONE":
-        return f"NOT ({' OR '.join(children)})"
-    return None
+    assert rule_type == "NONE", f"unknown segment rule type {rule_type!r}"
+    return f"NOT ({' OR '.join(children)})"
 
 
 def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | None:
@@ -534,8 +537,7 @@ def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | N
     The expression goes after `WHERE i.environment_id = '<env-key>' AND ...`.
     The caller composes the surrounding `SELECT ... FROM IDENTITIES i`.
     """
-    if ctx.segment_key is None:
-        ctx = ctx.with_segment_key(segment["key"])
+    ctx = ctx.with_segment_key(segment["key"])
     rules = segment.get("rules") or []
     if not rules:
         return "FALSE"
