@@ -51,15 +51,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
 
 
-def _snowflake_creds_present() -> bool:
-    return bool(os.environ.get("SNOWFLAKE_ACCOUNT")) and bool(os.environ.get("SNOWFLAKE_USER"))
+_REQUIRED_ENV = ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PRIVATE_KEY_PATH")
 
 
 @pytest.fixture(scope="session")
 def snowflake_session() -> Iterator[Session]:
     """Snowpark session keyed off SNOWFLAKE_* env vars. Session-scoped."""
-    if not _snowflake_creds_present():  # pragma: no cover - env-dependent skip
-        pytest.skip("SNOWFLAKE_ACCOUNT / SNOWFLAKE_USER not set")
+    missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
+    if missing:
+        pytest.skip(f"required env vars not set: {', '.join(missing)}")
 
     config: dict[str, str] = {
         "account": os.environ["SNOWFLAKE_ACCOUNT"],
@@ -68,14 +68,8 @@ def snowflake_session() -> Iterator[Session]:
         "warehouse": os.environ.get("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
         "database": os.environ.get("SNOWFLAKE_DATABASE", "FS_TEST"),
         "schema": os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC"),
+        "private_key_file": os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"],
     }
-    if pk_path := os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH"):
-        config["private_key_file"] = pk_path
-    elif password := os.environ.get("SNOWFLAKE_PASSWORD"):  # pragma: no cover - alt auth path
-        config["password"] = password
-    else:  # pragma: no cover - env-dependent skip
-        pytest.skip("no SNOWFLAKE_PRIVATE_KEY_PATH or SNOWFLAKE_PASSWORD")
-
     sess = Session.builder.configs(config).create()
     try:
         yield sess
@@ -109,8 +103,6 @@ def parity_table(snowflake_session: Any) -> Iterator[str]:
 
 
 def _test_case_paths() -> list[Path]:
-    if not ENGINE_TEST_DATA.exists():  # pragma: no cover - submodule-not-checked-out fallback
-        return []
     return sorted([*ENGINE_TEST_DATA.glob("*.json"), *ENGINE_TEST_DATA.glob("*.jsonc")])
 
 
@@ -152,8 +144,6 @@ def loaded_cases(snowflake_session: Any, parity_table: str) -> Iterator[list[Eng
     filter by). One Snowflake round-trip for all 102 cases.
     """
     cases = load_test_cases()
-    if not cases:  # pragma: no cover - submodule-not-checked-out fallback
-        pytest.skip("engine-test-data submodule not initialised")
     overridden: list[EngineTestCase] = []
     selects: list[str] = []
     for i, case in enumerate(cases):
@@ -191,13 +181,14 @@ def parity_results(
     loaded_cases: list[EngineTestCase],
 ) -> dict[tuple[int, str], bool | None]:
     """Run every (case, segment) pair's translated SQL in one mega-query
-    and return a `(case_idx, seg_key) -> bool | None` dict. `None` means
-    the segment uses an operator the translator can't handle (test will
-    pytest.skip on that key).
+    and return a `(case_idx, seg_key) -> bool` dict. Every case in the
+    dataset compiles today (cases that need to fall back to the engine
+    are listed in `XFAIL_CASE_FILENAMES`), so we don't carry None as a
+    third state.
 
     One Snowflake round-trip for all 510 pairs.
     """
-    pairs: list[tuple[int, str, str | None, str]] = []
+    pairs: list[tuple[int, str, str, str]] = []
     select_clauses: list[str] = []
     for case_idx, case in enumerate(loaded_cases):
         eval_ctx = case["context"]
@@ -205,11 +196,13 @@ def parity_results(
         for seg_key, segment in (eval_ctx.get("segments") or {}).items():
             tr_ctx = TranslateContext(evaluation_context=eval_ctx, dialect=SnowflakeDialect())
             sql = translate_segment(segment, tr_ctx)
+            assert sql is not None, (
+                f"case {case_idx} seg {seg_key} compiled to None — "
+                "either fix the translator or xfail the case by filename"
+            )
             pairs.append((case_idx, seg_key, sql, env_key))
 
     for i, (_case_idx, _seg_key, sql, env_key) in enumerate(pairs):
-        if sql is None:  # pragma: no cover - every case in the dataset compiles today
-            continue
         env_lit = _q(env_key)
         select_clauses.append(
             f"SELECT {i} AS pair_id, "
@@ -217,15 +210,10 @@ def parity_results(
             f"WHERE i.environment_id = '{env_lit}' AND ({sql})) AS m"
         )
 
-    results: dict[tuple[int, str], bool | None] = {}
-    if select_clauses:  # pragma: no branch - dataset always yields at least one clause
-        rows = snowflake_session.sql("\nUNION ALL\n".join(select_clauses)).collect()
-        for row in rows:
-            i = int(row["PAIR_ID"])
-            case_idx, seg_key, _sql, _env = pairs[i]
-            results[(case_idx, seg_key)] = bool(row["M"])
-    # Fill in untranslatable pairs as None so test parametrisation can skip.
-    for case_idx, seg_key, sql, _env in pairs:
-        if sql is None:  # pragma: no cover - every case in the dataset compiles today
-            results[(case_idx, seg_key)] = None
+    results: dict[tuple[int, str], bool] = {}
+    rows = snowflake_session.sql("\nUNION ALL\n".join(select_clauses)).collect()
+    for row in rows:
+        i = int(row["PAIR_ID"])
+        case_idx, seg_key, _sql, _env = pairs[i]
+        results[(case_idx, seg_key)] = bool(row["M"])
     return results
