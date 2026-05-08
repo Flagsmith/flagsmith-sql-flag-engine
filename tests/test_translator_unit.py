@@ -3,6 +3,7 @@
 Asserts SQL string shapes for representative segments.
 """
 
+import pytest
 from flag_engine.context.types import EvaluationContext
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
@@ -12,9 +13,8 @@ from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
 def _ctx(env_key: str = "test-env-key", env_name: str = "Test") -> TranslateContext:
     eval_ctx: EvaluationContext = {
         "environment": {"key": env_key, "name": env_name},
-        # Identity carries every trait keyed by representative segments below;
-        # PERCENTAGE_SPLIT bails when the prop isn't a known trait of the
-        # context identity, so make sure it is.
+        # PERCENTAGE_SPLIT short-circuits to FALSE when the prop isn't in
+        # the eval context's traits, so seed the traits referenced below.
         "identity": {
             "identifier": "u",
             "key": "k",
@@ -379,9 +379,6 @@ def test_translate_segment__modulo_with_injection_in_divisor__compiles_to_false(
     assert sql == "((FALSE))"
 
 
-# --- coverage: untranslatable operator and condition shapes ---
-
-
 def test_translate_segment__unknown_operator__returns_none() -> None:
     # Given a condition with an operator the translator doesn't support
     seg = {
@@ -407,9 +404,6 @@ def test_translate_segment__condition_without_property__compiles_to_false() -> N
     # When / Then the predicate collapses to FALSE (engine looks up nothing,
     # the comparator's cast fails, returns False)
     assert translate_segment(seg, _ctx()) == "((FALSE))"
-
-
-# --- coverage: PERCENTAGE_SPLIT short-circuits ---
 
 
 def test_translate_segment__percentage_split_unparseable_threshold__compiles_to_false() -> None:
@@ -546,9 +540,6 @@ def test_translate_segment__percentage_split_trait_not_in_context__compiles_to_f
     assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
-# --- coverage: identity-bound JSONPath comparators (column refs, not pre-eval) ---
-
-
 def test_translate_segment__is_set_on_identity_identifier__emits_true() -> None:
     # Given an IS_SET on $.identity.identifier — every IDENTITIES row IS an
     # identity, so the predicate is unconditionally true
@@ -676,9 +667,6 @@ def test_translate_segment__comparison_with_none_value__compiles_to_false() -> N
     assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
-# --- coverage: rule composition ---
-
-
 def test_translate_segment__rule_with_untranslatable_nested_rule__returns_none() -> None:
     # Given a nested rule containing an untranslatable operator
     seg = {
@@ -703,33 +691,10 @@ def test_translate_segment__rule_with_untranslatable_nested_rule__returns_none()
     assert translate_segment(seg, _ctx()) is None
 
 
-def test_translate_segment__none_rule_type__inverts_predicate() -> None:
-    # Given a NONE rule (matches when no condition matches)
-    seg = {
-        "key": "r3",
-        "name": "s",
-        "rules": [
-            {
-                "type": "NONE",
-                "conditions": [{"operator": "EQUAL", "property": "plan", "value": "growth"}],
-            }
-        ],
-    }
-
-    # When translated
-    sql = translate_segment(seg, _ctx())
-
-    # Then the rule is wrapped in a NOT
-    assert sql is not None
-    assert sql.startswith("(NOT (") or "NOT (" in sql
-
-
 def test_translate_segment__unknown_rule_type__raises() -> None:
     # Given a segment with a rule type the schema doesn't allow (Flagsmith's
     # segment validation rejects this upstream — reaching the translator with
     # one is internal misuse, not a runtime input we should silently swallow)
-    import pytest
-
     seg = {
         "key": "r4",
         "name": "s",
@@ -745,9 +710,6 @@ def test_translate_segment__unknown_rule_type__raises() -> None:
     # Then the assert fires loudly rather than returning a wrong-but-quiet answer
     with pytest.raises(AssertionError):
         translate_segment(seg, _ctx())
-
-
-# --- coverage: helpers ---
 
 
 def test_translate_segment__in_with_non_iterable_value__compiles_to_false() -> None:

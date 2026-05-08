@@ -1,14 +1,10 @@
-"""Parity suite: every engine-test-data case translated and run against
-Snowflake, compared to flag_engine.is_context_in_segment.
+"""Parity suite: every engine-test-data segment translated and run against
+Snowflake, compared to `flag_engine.is_context_in_segment`.
 
-Skipped if SNOWFLAKE_* env vars aren't set. CI sets the creds via secrets
-and runs this suite as part of `make test`.
-
-The Snowflake round-trips happen in `conftest.py`'s session-scoped
-fixtures: one INSERT for all 102 cases, one SELECT mega-query for all
-510 pair evaluations. The per-test function below is just a dict lookup
-against the pre-computed `snowflake_results` and a comparison against
-the engine's in-memory result.
+Needs Snowflake creds — the `conftest` fixtures read `SNOWFLAKE_*` env
+vars; CI provides them via secrets. The fixtures batch all rows into a
+single INSERT and all predicate evaluations into a single SELECT, so
+the per-test function here is just a dict lookup plus a bool compare.
 """
 
 from __future__ import annotations
@@ -22,10 +18,9 @@ from tests.conftest import (
     SegmentTestResult,
 )
 
-# Engine-test-data cases the SQL translator can't match the engine on;
-# tagged xfail so a regression elsewhere doesn't get masked. Keys are
-# file stems (matching `EngineTestCase.name`). If you're adding to this
-# list, put the why next to the entry.
+# Cases the SQL translator can't match the engine on; xfail keeps the
+# divergence visible without masking a regression elsewhere. Entries are
+# file stems (matching `EngineTestCase.name`); add the why inline.
 XFAIL_CASE_NAMES = {
     # Engine sorts semver prereleases (1.0.0-rc.2 < 1.0.0-rc.3); the SQL
     # semver-sort-key collapses to major.minor.patch only.

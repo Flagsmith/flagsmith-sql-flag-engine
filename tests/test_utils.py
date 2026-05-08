@@ -71,7 +71,7 @@ def test_numeric_literal__numeric_string__returns_canonical_float_string() -> No
     # Given a string that parses cleanly as a number
     value = "30"
 
-    # When sanitised
+    # When validated
     out = numeric_literal(value)
 
     # Then the result is the canonical float string form
@@ -80,7 +80,7 @@ def test_numeric_literal__numeric_string__returns_canonical_float_string() -> No
 
 def test_numeric_literal__numeric_value__returns_canonical_float_string() -> None:
     # Given an int or float value
-    # When sanitised
+    # When validated
     # Then both produce canonical float string forms
     assert numeric_literal(30) == "30.0"
     assert numeric_literal(1.5) == "1.5"
@@ -90,10 +90,10 @@ def test_numeric_literal__non_numeric_string__returns_none() -> None:
     # Given a non-numeric string
     value = "abc"
 
-    # When sanitised
+    # When validated
     out = numeric_literal(value)
 
-    # Then the sanitiser declines (signals untranslatable to caller)
+    # Then the helper rejects — signals untranslatable to the caller
     assert out is None
 
 
@@ -101,24 +101,24 @@ def test_numeric_literal__injection_payload__returns_none() -> None:
     # Given a SQL-injection-shaped value
     value = "100; DROP TABLE IDENTITIES; --"
 
-    # When sanitised
+    # When validated
     out = numeric_literal(value)
 
-    # Then the sanitiser declines — float() raises before any SQL is built
+    # Then the helper rejects — float() raises before any SQL is built
     assert out is None
 
 
 def test_numeric_literal__none_value__returns_none() -> None:
     # Given a None value
-    # When sanitised
-    # Then the sanitiser declines (TypeError caught)
+    # When validated
+    # Then the helper rejects (TypeError caught)
     assert numeric_literal(None) is None
 
 
 def test_numeric_literal__bool_value__returns_none() -> None:
     # Given a Python bool (which float() would happily coerce to 1.0/0.0)
-    # When sanitised
-    # Then the sanitiser declines explicitly — engine treats bool segment
+    # When validated
+    # Then the helper rejects explicitly — engine treats bool segment
     # values as strings via type-coercion, so a numeric interpretation
     # would diverge from engine behaviour
     assert numeric_literal(True) is None
@@ -129,7 +129,7 @@ def test_modulo_literal__well_formed_pair__returns_canonical_floats() -> None:
     # Given a well-formed `divisor|remainder` operand
     value = "5|0"
 
-    # When sanitised
+    # When validated
     out = modulo_literal(value)
 
     # Then both sides come back as canonical float strings
@@ -140,8 +140,8 @@ def test_modulo_literal__missing_separator__returns_none() -> None:
     # Given a value lacking the `|` separator
     value = "5"
 
-    # When sanitised
-    # Then the sanitiser declines (ValueError on unpack)
+    # When validated
+    # Then the helper rejects (ValueError on unpack)
     assert modulo_literal(value) is None
 
 
@@ -149,10 +149,10 @@ def test_modulo_literal__injection_in_divisor__returns_none() -> None:
     # Given an injection payload in the divisor side
     value = "5; DROP TABLE IDENTITIES; --|0"
 
-    # When sanitised
+    # When validated
     out = modulo_literal(value)
 
-    # Then the sanitiser declines (float() on the divisor raises)
+    # Then the helper rejects (float() on the divisor raises)
     assert out is None
 
 
@@ -160,17 +160,17 @@ def test_modulo_literal__injection_in_remainder__returns_none() -> None:
     # Given an injection payload in the remainder side
     value = "5|0; DROP TABLE IDENTITIES; --"
 
-    # When sanitised
+    # When validated
     out = modulo_literal(value)
 
-    # Then the sanitiser declines
+    # Then the helper rejects
     assert out is None
 
 
 def test_modulo_literal__non_string_value__returns_none() -> None:
     # Given a non-string value (e.g. None or a number)
-    # When sanitised
-    # Then the sanitiser declines — split() raises AttributeError on None,
+    # When validated
+    # Then the helper rejects — split() raises AttributeError on None,
     # produces no `|` for a number that stringifies cleanly
     assert modulo_literal(None) is None
     assert modulo_literal(5) is None

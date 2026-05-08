@@ -1,22 +1,21 @@
 """Pytest fixtures.
 
-Unit tests run anywhere; the parity suite needs a Snowflake account. The
-parity fixtures skip automatically if `SNOWFLAKE_ACCOUNT` isn't set, so
-running `pytest` with no env vars only runs the unit tests.
+Unit tests run anywhere. The parity suite needs a Snowflake account —
+the `snowflake_session` fixture reads `SNOWFLAKE_*` env vars directly
+(missing creds raise rather than silently skip).
 
-Each parity-test session creates a per-run transient `IDENTITIES_PARITY_<uuid>`
-table so concurrent CI runs don't step on each other. Schema mirrors
-`SnowflakeDialect.SCHEMA_DDL`: 4 typed columns + a `traits` VARIANT.
-Table is dropped on teardown.
+Each parity-test session creates a per-run `IDENTITIES_PARITY_<uuid>`
+TEMPORARY table (auto-dropped at session close, no explicit teardown
+needed). Schema mirrors `SnowflakeDialect.SCHEMA_DDL`: 4 typed columns
+plus a `traits` VARIANT.
 
-The parity fixtures are batched to keep Snowflake round-trips down:
+Round-trips are batched to keep wall time down:
 
-  - All test-case identities go into the scratch table in a single
-    `INSERT INTO ... VALUES (...), (...), ...` statement.
-  - All test-case (segment, identity) pairs are evaluated in a single
-    `SELECT ... UNION ALL ...` mega-query, returning a `(case_idx, seg_key)
-    -> bool` dict. Per-test parametrised tests then do an in-memory dict
-    lookup. Two Snowflake round-trips for the whole suite.
+  - All identities load via one multi-row `INSERT ... SELECT UNION ALL`.
+  - All (case, segment) pairs evaluate via one `SELECT ... UNION ALL`,
+    returning a `(case_name, segment_key) -> SegmentTestResult` dict.
+
+Parametrised tests do an in-memory dict lookup against that result.
 """
 
 import copy
@@ -105,8 +104,9 @@ def snowflake_session() -> Iterator[Session]:
 
 @pytest.fixture(scope="session")
 def snowflake_identity_table(snowflake_session: Session) -> str:
-    """A scratch IDENTITIES table mirroring
-    `SnowflakeDialect.SCHEMA_DDL`. Returns the fully-qualified name."""
+    """Per-run scratch IDENTITIES table mirroring `SnowflakeDialect.SCHEMA_DDL`.
+    TEMPORARY, so it auto-drops at session close. Returns the fully-qualified
+    name."""
     suffix = uuid.uuid4().hex[:8]
     db = os.environ.get("SNOWFLAKE_DATABASE", "FS_TEST")
     schema = os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC")
@@ -145,9 +145,12 @@ def snowflake_identities(
     snowflake_session: Session,
     snowflake_identity_table: str,
 ) -> list[EngineTestCase]:
-    """Load every test case's identity in a single multi-row INSERT.
+    """Insert one row per case-with-identity in a single multi-row INSERT.
 
-    Returns the list of cases with environment keys modified for uniqueness.
+    Returns every case (indexed 1:1 with `TEST_CASES`) with its
+    `environment.key` suffixed for cross-case uniqueness. Cases without
+    an identity get no row — their segments compile to row-independent
+    SQL, so the empty result still gives the right answer.
     """
     overridden: list[EngineTestCase] = []
     selects: list[str] = []
@@ -196,13 +199,12 @@ def snowflake_results(
     snowflake_identity_table: str,
     snowflake_identities: list[EngineTestCase],
 ) -> dict[tuple[str, str], SegmentTestResult]:
-    """Run every (case, segment) pair's translated SQL in one mega-query
-    and return a `(case_idx, seg_key) -> bool` dict. Every case in the
-    dataset compiles today (cases that need to fall back to the engine
-    are listed in `XFAIL_CASE_FILENAMES`), so we don't carry None as a
-    third state.
+    """Run every (case, segment) pair's translated SQL in one mega-query.
 
-    One Snowflake round-trip for all 510 pairs.
+    Returns a `(case_name, segment_key) -> SegmentTestResult` dict. Every
+    case in the dataset compiles today; cases that need to fall back to
+    the engine are listed in `XFAIL_CASE_NAMES` rather than carrying a
+    third state on the way through.
     """
     select_clauses: list[str] = []
     results: dict[tuple[str, str], SegmentTestResult] = {}
@@ -219,7 +221,7 @@ def snowflake_results(
             sql = translate_segment(segment, translate_context)
             assert sql is not None, (
                 f"case {test_case['name']} seg {segment_key} unsupported — "
-                "either fix the translator or xfail the case by filename"
+                "either fix the translator or add case name to XFAIL_CASE_NAMES"
             )
             pair_id = _q(test_case["name"] + _PAIR_SEP + segment_key)
             select_clauses.append(
