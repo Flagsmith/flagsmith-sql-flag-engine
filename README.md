@@ -95,19 +95,19 @@ Large.
 ## Engine parity
 
 Validated against [Flagsmith/engine-test-data](https://github.com/Flagsmith/engine-test-data),
-the test suite all engine implementations are tested against. The parity
-suite loads each test case's identity into a Snowflake scratch table,
-translates the case's segments, runs the generated SQL, and compares to
-`flag_engine.is_context_in_segment`.
+the test suite all engine implementations are tested against. The
+engine parity suite loads each test case's identity into a Snowflake
+scratch table, translates the case's segments, runs the generated SQL,
+and compares to `flag_engine.is_context_in_segment`.
 
-To run the parity suite locally:
+To run the engine-parity suite locally:
 
 ```bash
 git submodule update --init                 # pull engine-test-data
 export SNOWFLAKE_ACCOUNT=...
 export SNOWFLAKE_USER=...
 export SNOWFLAKE_PRIVATE_KEY_PATH=...
-uv run pytest -m parity
+uv run pytest -m engine_parity
 ```
 
 ## Dialects
@@ -137,8 +137,7 @@ Postgres) means writing one class.
 make install                  # uv sync + pre-commit install
 make lint                     # run pre-commit hooks across the tree
 make typecheck                # mypy
-make test                     # unit tests, no Snowflake required
-make test opts="-m parity"    # parity suite, Snowflake creds required
+make test                     # unit tests
 ```
 
 Ruff (lint + format) runs as a pre-commit hook on every commit. Mypy

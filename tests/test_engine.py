@@ -1,10 +1,10 @@
-"""Parity suite: every engine-test-data segment translated and run against
-Snowflake, compared to `flag_engine.is_context_in_segment`.
+"""Engine-parity suite: every engine-test-data segment translated and run
+through each registered `DialectTestHarness`, compared to
+`flag_engine.is_context_in_segment`.
 
-Needs Snowflake creds — the `conftest` fixtures read `SNOWFLAKE_*` env
-vars; CI provides them via secrets. The fixtures batch all rows into a
-single INSERT and all predicate evaluations into a single SELECT, so
-the per-test function here is just a dict lookup plus a bool compare.
+Each harness needs its own SQL engine reachable; the fixtures in
+`conftest` raise on missing creds rather than silently skip. Per-harness
+xfails live on the harness itself (see `xfail_case_names`).
 """
 
 from __future__ import annotations
@@ -17,26 +17,9 @@ from tests.conftest import (
     SegmentEngineTestCase,
     SegmentTestResult,
 )
-
-# Cases the SQL translator can't match the engine on; xfail keeps the
-# divergence visible without masking a regression elsewhere. Entries are
-# file stems (matching `EngineTestCase.name`); add the why inline.
-XFAIL_CASE_NAMES = {
-    # Engine sorts semver prereleases (1.0.0-rc.2 < 1.0.0-rc.3); the SQL
-    # semver-sort-key collapses to major.minor.patch only.
-    "test_semver_greater_than_prerelease__should_match",
-    "test_semver_less_than_prerelease__should_match",
-    # Engine does trait-first dispatch: a row with a trait literally named
-    # `$.identity` shadows the JSONPath lookup. Replicating per-row trait
-    # fallback in SQL roughly doubles the cost of every wrapped JSONPath
-    # condition (Snowflake evaluates both IFF arms), so we accept the
-    # divergence on this niche shape (`$.`-prefixed trait names) and let
-    # callers fall back to the engine.
-    "test_jsonpath_like_trait__existing_jsonpath__should_match_trait",
-}
+from tests.harnesses import DialectTestHarness
 
 
-@pytest.mark.parity
 @pytest.mark.parametrize(
     "segment_test_case",
     SEGMENT_TEST_CASES,
@@ -47,15 +30,17 @@ XFAIL_CASE_NAMES = {
 )
 def test_translate_segment__engine_test_data_case__matches_engine(
     segment_test_case: SegmentEngineTestCase,
-    snowflake_results: dict[tuple[str, str], SegmentTestResult],
+    harness: DialectTestHarness,
+    harness_results: dict[tuple[str, str], SegmentTestResult],
 ) -> None:
     # Given a (case, segment) pair from engine-test-data and the pre-computed
-    # SQL match for that pair
-    if (case_name := segment_test_case["name"]) in XFAIL_CASE_NAMES:
-        pytest.xfail(f"known divergence: {case_name}")
+    # SQL match for that pair on the active harness
+    case_name = segment_test_case["name"]
+    if case_name in harness.xfail_case_names:
+        pytest.xfail(f"known {harness.name} divergence: {case_name}")
 
     segment_key = segment_test_case["segment_key"]
-    sql_match = snowflake_results[(case_name, segment_key)]["is_match"]
+    sql_match = harness_results[(case_name, segment_key)]["is_match"]
 
     # When the engine evaluates the same (context, segment) in-memory
     engine_match = is_context_in_segment(
@@ -64,5 +49,6 @@ def test_translate_segment__engine_test_data_case__matches_engine(
 
     # Then the SQL-evaluated and engine-evaluated booleans agree
     assert engine_match == sql_match, (
-        f"engine={engine_match} sql={sql_match} for case={case_name} seg={segment_key}"
+        f"engine={engine_match} sql={sql_match} for "
+        f"harness={harness.name} case={case_name} seg={segment_key}"
     )

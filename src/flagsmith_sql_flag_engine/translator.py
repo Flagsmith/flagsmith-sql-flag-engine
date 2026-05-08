@@ -516,7 +516,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     # trait-first dispatch (would roughly double the cost of every wrapped
     # JSONPath condition); a row that happens to carry a trait literally
     # named e.g. `$.identity` would shadow our resolution. Niche shape;
-    # parity suite xfails the one engine-test-data case that hits it.
+    # the engine parity suite xfails the one engine-test-data case that hits it.
     if classification.kind in ("identifier", "key"):
         path = ctx.jsonpath_expr(
             "$.identity.identifier" if classification.kind == "identifier" else "$.identity.key"

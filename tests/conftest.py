@@ -1,45 +1,44 @@
 """Pytest fixtures.
 
-Unit tests run anywhere. The parity suite needs a Snowflake account —
-the `snowflake_session` fixture reads `SNOWFLAKE_*` env vars directly
-(missing creds raise rather than silently skip).
+Unit tests run anywhere. The engine-parity suite drives a
+`DialectTestHarness` (see `tests/harnesses`) — one harness per SQL
+engine, registered in `HARNESSES`. Each harness owns its own session,
+scratch-table DDL, and batched INSERT / SELECT shapes.
 
-Each parity-test session creates a per-run `IDENTITIES_PARITY_<uuid>`
-TEMPORARY table (auto-dropped at session close, no explicit teardown
-needed). Schema mirrors `SnowflakeDialect.SCHEMA_DDL`: 4 typed columns
-plus a `traits` VARIANT.
+Per harness session, the fixtures:
 
-Round-trips are batched to keep wall time down:
-
-  - All identities load via one multi-row `INSERT ... SELECT UNION ALL`.
-  - All (case, segment) pairs evaluate via one `SELECT ... UNION ALL`,
-    returning a `(case_name, segment_key) -> SegmentTestResult` dict.
+  - load every case-with-identity into the harness's scratch table in
+    one batched INSERT (`harness_identity_table`);
+  - translate each (case, segment) pair against the harness's dialect
+    and ask the harness to evaluate them all in one batched SELECT
+    (`harness_results`).
 
 Parametrised tests do an in-memory dict lookup against that result.
 """
 
 import copy
 import json
-import os
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict, cast
 
 import json5
 import pytest
 from flag_engine.context.types import EvaluationContext, IdentityContext, SegmentContext
 from flag_engine.result.types import EvaluationResult
-from snowflake.snowpark import Session
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
-from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
-from flagsmith_sql_flag_engine.utils import escape_string
+from tests.harnesses import (
+    HARNESSES,
+    DialectTestHarness,
+    EvaluationCase,
+    IdentityRow,
+)
 
 
 class EngineTestCase(TypedDict):
     """An engine-test-data fixture file. The `result` field (engine-evaluated
-    flag values) is carried through but unused by the parity suite."""
+    flag values) is carried through but unused by the engine-parity suite."""
 
     name: str
     context: EvaluationContext
@@ -83,161 +82,111 @@ SEGMENT_TEST_CASES: list[SegmentEngineTestCase] = [
 ]
 
 
-@pytest.fixture(scope="session")
-def snowflake_session() -> Iterator[Session]:
-    """Snowpark session keyed off SNOWFLAKE_* env vars. Session-scoped."""
-    config: dict[str, str] = {
-        "account": os.environ["SNOWFLAKE_ACCOUNT"],
-        "user": os.environ["SNOWFLAKE_USER"],
-        "role": os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
-        "warehouse": os.environ.get("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
-        "database": os.environ.get("SNOWFLAKE_DATABASE", "FS_TEST"),
-        "schema": os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC"),
-        "private_key_file": os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"],
-    }
-    sess = Session.builder.configs(config).create()
-    try:
-        yield sess
-    finally:
-        sess.close()
-
-
-@pytest.fixture(scope="session")
-def snowflake_identity_table(snowflake_session: Session) -> str:
-    """Per-run scratch IDENTITIES table mirroring `SnowflakeDialect.SCHEMA_DDL`.
-    TEMPORARY, so it auto-drops at session close. Returns the fully-qualified
-    name."""
-    suffix = uuid.uuid4().hex[:8]
-    db = os.environ.get("SNOWFLAKE_DATABASE", "FS_TEST")
-    schema = os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC")
-    table = f"{db}.{schema}.IDENTITIES_PARITY_{suffix}"
-    snowflake_session.sql(
-        f"""
-        CREATE TEMPORARY TABLE {table} (
-            environment_id STRING NOT NULL,
-            id NUMBER NOT NULL,
-            identifier STRING NOT NULL,
-            identity_key STRING NOT NULL,
-            traits VARIANT
-        )
-        """
-    ).collect()
-    return table
-
-
-def _q(s: str) -> str:
-    # Snowflake string literals process `\` as an escape, so JSON traits with
-    # `\uXXXX` or `\"` would lose their backslash before reaching PARSE_JSON.
-    # Double the backslashes here; the single-quote doubling is the SQL-
-    # standard escape that `escape_string` already handles.
-    return escape_string(s.replace("\\", "\\\\"))
-
-
-# ASCII Unit Separator. Used to pack `(case_name, segment_key)` into a single
-# string column on the parity SELECT and split it back at row-iteration time.
-# Picked over `:` (or any printable character) so a future case_name or
-# segment_key containing punctuation can't collide with the separator.
+# ASCII Unit Separator. Used to pack `(case_name, segment_key)` into a
+# single string column on the engine-parity SELECT and split it back at
+# row-iteration time. Picked over `:` (or any printable character) so a
+# future case_name or segment_key containing punctuation can't collide.
 _PAIR_SEP = "\x1f"
 
 
+@pytest.fixture(scope="session", params=HARNESSES, ids=lambda h: h.name)
+def harness(request: pytest.FixtureRequest) -> DialectTestHarness:
+    return cast(DialectTestHarness, request.param)
+
+
 @pytest.fixture(scope="session")
-def snowflake_identities(
-    snowflake_session: Session,
-    snowflake_identity_table: str,
-) -> list[EngineTestCase]:
-    """Insert one row per case-with-identity in a single multi-row INSERT.
+def harness_session(harness: DialectTestHarness) -> Iterator[Any]:
+    with harness.session() as sess:
+        yield sess
 
-    Returns every case (indexed 1:1 with `TEST_CASES`) with its
-    `environment.key` suffixed for cross-case uniqueness. Cases without
-    an identity get no row — their segments compile to row-independent
-    SQL, so the empty result still gives the right answer.
-    """
+
+@pytest.fixture(scope="session")
+def harness_identities() -> list[EngineTestCase]:
+    """Deep-copied cases with `environment.key` suffixed for cross-case
+    uniqueness. Same shape across harnesses (the suffixing is dialect-
+    agnostic), so the fixture is computed once per pytest session."""
     overridden: list[EngineTestCase] = []
-    selects: list[str] = []
-
     for identity_id, case in enumerate(TEST_CASES, start=1):
         case = copy.deepcopy(case)
-        evaluation_context = case["context"]
-
-        # Make every environment unique so per-case rows don't collide
-        # when source cases share an `environment.key`.
-        env = evaluation_context["environment"]
-        env["key"] += str(identity_id)
+        case["context"]["environment"]["key"] += str(identity_id)
         overridden.append(case)
-
-        # Cases without an identity have no row in IDENTITIES; the SQL
-        # we emit for their segments is row-independent (constant FALSE
-        # / TRUE via `_engine_static_verdict` or the identity-object
-        # fallback), so a missing row gives the right answer.
-        identity_context: IdentityContext | None = evaluation_context.get("identity")
-        if not identity_context:
-            continue
-
-        env_id = _q(env["key"])
-        identifier = _q(identity_context.get("identifier") or "")
-        identity_key = _q(identity_context.get("key") or "")
-
-        if traits := identity_context.get("traits"):
-            traits_literal = f"PARSE_JSON('{_q(json.dumps(traits))}')"
-        else:
-            traits_literal = "NULL"
-        selects.append(
-            f"SELECT '{env_id}', {identity_id}, '{identifier}', '{identity_key}', {traits_literal}"
-        )
-
-    snowflake_session.sql(
-        f"INSERT INTO {snowflake_identity_table} "
-        "(environment_id, id, identifier, identity_key, traits) " + "\nUNION ALL\n".join(selects)
-    ).collect()
-
     return overridden
 
 
 @pytest.fixture(scope="session")
-def snowflake_results(
-    snowflake_session: Session,
-    snowflake_identity_table: str,
-    snowflake_identities: list[EngineTestCase],
+def harness_identity_table(
+    harness: DialectTestHarness,
+    harness_session: Any,
+    harness_identities: list[EngineTestCase],
+) -> str:
+    """Per-harness scratch IDENTITIES table loaded with one row per case-
+    with-identity. Cases without an identity get no row — their segments
+    compile to row-independent SQL, so the empty result still gives the
+    right answer."""
+    rows: list[IdentityRow] = []
+    for identity_id, case in enumerate(harness_identities, start=1):
+        ctx = case["context"]
+        identity: IdentityContext | None = ctx.get("identity")
+        if not identity:
+            continue
+        traits = identity.get("traits")
+        rows.append(
+            IdentityRow(
+                environment_id=ctx["environment"]["key"],
+                id=identity_id,
+                identifier=identity.get("identifier") or "",
+                identity_key=identity.get("key") or "",
+                traits_json=json.dumps(traits) if traits else None,
+            )
+        )
+    return harness.setup_identities(harness_session, rows)
+
+
+@pytest.fixture(scope="session")
+def harness_results(
+    harness: DialectTestHarness,
+    harness_session: Any,
+    harness_identity_table: str,
+    harness_identities: list[EngineTestCase],
 ) -> dict[tuple[str, str], SegmentTestResult]:
-    """Run every (case, segment) pair's translated SQL in one mega-query.
+    """Run every (case, segment) pair's translated SQL through the harness
+    in one batched query.
 
     Returns a `(case_name, segment_key) -> SegmentTestResult` dict. Every
     case in the dataset compiles today; cases that need to fall back to
-    the engine are listed in `XFAIL_CASE_NAMES` rather than carrying a
-    third state on the way through.
+    the engine are listed in the harness's `xfail_case_names` rather than
+    carrying a third state on the way through.
     """
-    select_clauses: list[str] = []
-    results: dict[tuple[str, str], SegmentTestResult] = {}
-
-    for test_case in snowflake_identities:
-        evaluation_context = test_case["context"]
-        environment_key = evaluation_context["environment"]["key"]
-
-        for segment_key, segment in (evaluation_context.get("segments") or {}).items():
-            translate_context = TranslateContext(
-                evaluation_context=evaluation_context,
-                dialect=SnowflakeDialect(),
+    cases: list[EvaluationCase] = []
+    for case in harness_identities:
+        ctx = case["context"]
+        env_key = ctx["environment"]["key"]
+        for segment_key, segment in (ctx.get("segments") or {}).items():
+            translate_ctx = TranslateContext(
+                evaluation_context=ctx,
+                dialect=harness.dialect,
             )
-            sql = translate_segment(segment, translate_context)
+            sql = translate_segment(segment, translate_ctx)
             assert sql is not None, (
-                f"case {test_case['name']} seg {segment_key} unsupported — "
-                "either fix the translator or add case name to XFAIL_CASE_NAMES"
+                f"case {case['name']} seg {segment_key} unsupported on {harness.name} — "
+                "either fix the translator or add the case name to the harness's "
+                "xfail_case_names"
             )
-            pair_id = _q(test_case["name"] + _PAIR_SEP + segment_key)
-            select_clauses.append(
-                f"SELECT '{pair_id}' AS test_case_name_segment_key, "
-                f"EXISTS (SELECT 1 FROM {snowflake_identity_table} i "
-                f"WHERE i.environment_id = '{_q(environment_key)}' AND ({sql})) AS m"
+            cases.append(
+                EvaluationCase(
+                    pair_id=case["name"] + _PAIR_SEP + segment_key,
+                    environment_key=env_key,
+                    predicate_sql=sql,
+                )
             )
 
-    rows = snowflake_session.sql("\nUNION ALL\n".join(select_clauses)).collect()
-
-    for row in rows:
-        test_case_name, segment_key = row["TEST_CASE_NAME_SEGMENT_KEY"].split(_PAIR_SEP, 1)
-        results[(test_case_name, segment_key)] = SegmentTestResult(
-            test_case_name=test_case_name,
+    raw = harness.evaluate(harness_session, harness_identity_table, cases)
+    results: dict[tuple[str, str], SegmentTestResult] = {}
+    for pair_id, is_match in raw.items():
+        case_name, segment_key = pair_id.split(_PAIR_SEP, 1)
+        results[(case_name, segment_key)] = SegmentTestResult(
+            test_case_name=case_name,
             segment_key=segment_key,
-            is_match=bool(row["M"]),
+            is_match=is_match,
         )
-
     return results

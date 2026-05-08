@@ -14,7 +14,7 @@ lint: ## Run linters (pre-commit hooks across the tree)
 	uv run prek run --all-files
 
 .PHONY: test
-test: ## Run unit tests. Override scope with opts, e.g. `make test opts='-m parity'`
+test: ## Run unit tests. Override scope with opts, e.g. `make test opts='-m engine_parity'`
 	uv run pytest $(opts)
 
 .PHONY: typecheck

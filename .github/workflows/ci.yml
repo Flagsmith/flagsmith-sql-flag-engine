@@ -3,15 +3,13 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [ main ]
 
 jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
     env:
-      # Parity tests skip cleanly when secrets are unavailable (forked PRs):
-      # the conftest fixture short-circuits on missing SNOWFLAKE_ACCOUNT.
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
       SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
