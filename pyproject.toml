@@ -47,6 +47,17 @@ testpaths = ["tests"]
 branch = true
 source = ["src"]
 
+[tool.coverage.report]
+# `match` statements exhaustive over a Literal type record a phantom
+# fall-through branch from the last case to function exit; coverage.py
+# can't see the type-system exhaustiveness mypy enforces. Treat any
+# `case` line as a possibly-partial branch so the gate stays at 100%
+# without us littering the source with `# pragma: no branch`.
+partial_branches = [
+    "pragma: no branch",
+    "case .+:",
+]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 100
