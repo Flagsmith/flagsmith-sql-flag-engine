@@ -4,8 +4,6 @@
 tests document the contract the rest of the translator depends on.
 """
 
-from __future__ import annotations
-
 from flagsmith_sql_flag_engine.utils import (
     escape_string,
     modulo_literal,

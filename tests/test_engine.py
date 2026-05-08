@@ -7,8 +7,8 @@ and runs this suite as part of `make test`.
 The Snowflake round-trips happen in `conftest.py`'s session-scoped
 fixtures: one INSERT for all 102 cases, one SELECT mega-query for all
 510 pair evaluations. The per-test function below is just a dict lookup
-against the pre-computed `parity_results` and a comparison against the
-engine's in-memory result.
+against the pre-computed `snowflake_results` and a comparison against
+the engine's in-memory result.
 """
 
 from __future__ import annotations
@@ -16,61 +16,58 @@ from __future__ import annotations
 import pytest
 from flag_engine.segments.evaluator import is_context_in_segment
 
-from tests.conftest import TEST_CASES, EngineTestCase, case_filename_at
+from tests.conftest import (
+    SEGMENT_TEST_CASES,
+    SegmentEngineTestCase,
+    SegmentTestResult,
+)
 
-# Cases the SQL translator can't match the engine on; tagged xfail so a
-# regression elsewhere doesn't get masked. If you're adding to this list,
-# put the why next to the filename.
-XFAIL_CASE_FILENAMES = {
+# Engine-test-data cases the SQL translator can't match the engine on;
+# tagged xfail so a regression elsewhere doesn't get masked. Keys are
+# file stems (matching `EngineTestCase.name`). If you're adding to this
+# list, put the why next to the entry.
+XFAIL_CASE_NAMES = {
     # Engine sorts semver prereleases (1.0.0-rc.2 < 1.0.0-rc.3); the SQL
     # semver-sort-key collapses to major.minor.patch only.
-    "test_semver_greater_than_prerelease__should_match.jsonc",
-    "test_semver_less_than_prerelease__should_match.jsonc",
+    "test_semver_greater_than_prerelease__should_match",
+    "test_semver_less_than_prerelease__should_match",
     # Engine does trait-first dispatch: a row with a trait literally named
     # `$.identity` shadows the JSONPath lookup. Replicating per-row trait
     # fallback in SQL roughly doubles the cost of every wrapped JSONPath
     # condition (Snowflake evaluates both IFF arms), so we accept the
     # divergence on this niche shape (`$.`-prefixed trait names) and let
     # callers fall back to the engine.
-    "test_jsonpath_like_trait__existing_jsonpath__should_match_trait.jsonc",
+    "test_jsonpath_like_trait__existing_jsonpath__should_match_trait",
 }
-
-
-def _all_case_segments() -> list[tuple[int, str]]:
-    """Flatten cases × segments for parametrisation. Read at collection time."""
-    out: list[tuple[int, str]] = []
-    for i, case in enumerate(TEST_CASES):
-        for seg_key in case["context"].get("segments") or {}:
-            out.append((i, seg_key))
-    return out
 
 
 @pytest.mark.parity
 @pytest.mark.parametrize(
-    "case_idx, seg_key",
-    _all_case_segments(),
-    ids=[f"case{i}-seg{k}" for i, k in _all_case_segments()],
+    "segment_test_case",
+    SEGMENT_TEST_CASES,
+    ids=[
+        f"{segment_test_case['name']}-{segment_test_case['segment_key']}"
+        for segment_test_case in SEGMENT_TEST_CASES
+    ],
 )
 def test_translate_segment__engine_test_data_case__matches_engine(
-    case_idx: int,
-    seg_key: str,
-    snowflake_identities: list[EngineTestCase],
-    parity_results: dict[tuple[int, str], bool],
+    segment_test_case: SegmentEngineTestCase,
+    snowflake_results: dict[tuple[str, str], SegmentTestResult],
 ) -> None:
     # Given a (case, segment) pair from engine-test-data and the pre-computed
-    # batched parity_results dict mapping each pair to its SQL-evaluated bool
-    filename = case_filename_at(case_idx)
-    if filename in XFAIL_CASE_FILENAMES:
-        pytest.xfail(f"known divergence: {filename}")
-    case = snowflake_identities[case_idx]
-    eval_ctx = case["context"]
-    segment = eval_ctx["segments"][seg_key]
-    sql_match = parity_results[(case_idx, seg_key)]
+    # SQL match for that pair
+    if (case_name := segment_test_case["name"]) in XFAIL_CASE_NAMES:
+        pytest.xfail(f"known divergence: {case_name}")
+
+    segment_key = segment_test_case["segment_key"]
+    sql_match = snowflake_results[(case_name, segment_key)]["is_match"]
 
     # When the engine evaluates the same (context, segment) in-memory
-    engine_match = is_context_in_segment(eval_ctx, segment)
+    engine_match = is_context_in_segment(
+        segment_test_case["context"], segment_test_case["segment_context"]
+    )
 
     # Then the SQL-evaluated and engine-evaluated booleans agree
     assert engine_match == sql_match, (
-        f"engine={engine_match} sql={sql_match} for case={case_idx} seg={seg_key}"
+        f"engine={engine_match} sql={sql_match} for case={case_name} seg={segment_key}"
     )

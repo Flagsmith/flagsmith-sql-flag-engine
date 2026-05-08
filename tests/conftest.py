@@ -19,8 +19,6 @@ The parity fixtures are batched to keep Snowflake round-trips down:
     lookup. Two Snowflake round-trips for the whole suite.
 """
 
-from __future__ import annotations
-
 import copy
 import json
 import os
@@ -31,7 +29,7 @@ from typing import TypedDict
 
 import json5
 import pytest
-from flag_engine.context.types import EvaluationContext, IdentityContext
+from flag_engine.context.types import EvaluationContext, IdentityContext, SegmentContext
 from flag_engine.result.types import EvaluationResult
 from snowflake.snowpark import Session
 
@@ -44,8 +42,22 @@ class EngineTestCase(TypedDict):
     """An engine-test-data fixture file. The `result` field (engine-evaluated
     flag values) is carried through but unused by the parity suite."""
 
+    name: str
     context: EvaluationContext
     result: EvaluationResult
+
+
+class SegmentEngineTestCase(EngineTestCase):
+    segment_key: str
+    segment_context: SegmentContext
+
+
+class SegmentTestResult(TypedDict):
+    """A match result for a given segment."""
+
+    test_case_name: str
+    segment_key: str
+    is_match: bool
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,13 +65,23 @@ ENGINE_TEST_DATA = REPO_ROOT / "engine-test-data" / "test_cases"
 TEST_CASE_PATHS: list[Path] = sorted(
     [*ENGINE_TEST_DATA.glob("*.json"), *ENGINE_TEST_DATA.glob("*.jsonc")]
 )
-TEST_CASES: list[EngineTestCase] = [json5.loads(p.read_text()) for p in TEST_CASE_PATHS]
-
-
-def case_filename_at(case_idx: int) -> str:
-    """Filename of the engine-test-data case at `case_idx` (matches the
-    indexing of `TEST_CASES`). Used by the xfail list in `test_engine.py`."""
-    return TEST_CASE_PATHS[case_idx].name
+TEST_CASES: list[EngineTestCase] = [
+    {
+        "name": p.stem,
+        "context": (raw := json5.loads(p.read_text()))["context"],
+        "result": raw["result"],
+    }
+    for p in TEST_CASE_PATHS
+]
+SEGMENT_TEST_CASES: list[SegmentEngineTestCase] = [
+    {
+        **test_case,
+        "segment_key": segment_key,
+        "segment_context": segment_context,
+    }
+    for test_case in TEST_CASES
+    for segment_key, segment_context in (test_case["context"].get("segments") or {}).items()
+]
 
 
 @pytest.fixture(scope="session")
@@ -111,6 +133,13 @@ def _q(s: str) -> str:
     return escape_string(s.replace("\\", "\\\\"))
 
 
+# ASCII Unit Separator. Used to pack `(case_name, segment_key)` into a single
+# string column on the parity SELECT and split it back at row-iteration time.
+# Picked over `:` (or any printable character) so a future case_name or
+# segment_key containing punctuation can't collide with the separator.
+_PAIR_SEP = "\x1f"
+
+
 @pytest.fixture(scope="session")
 def snowflake_identities(
     snowflake_session: Session,
@@ -122,6 +151,7 @@ def snowflake_identities(
     """
     overridden: list[EngineTestCase] = []
     selects: list[str] = []
+
     for identity_id, case in enumerate(TEST_CASES, start=1):
         case = copy.deepcopy(case)
         evaluation_context = case["context"]
@@ -139,11 +169,12 @@ def snowflake_identities(
         identity_context: IdentityContext | None = evaluation_context.get("identity")
         if not identity_context:
             continue
+
         env_id = _q(env["key"])
         identifier = _q(identity_context.get("identifier") or "")
         identity_key = _q(identity_context.get("key") or "")
-        traits = identity_context.get("traits") or {}
-        if traits:
+
+        if traits := identity_context.get("traits"):
             traits_literal = f"PARSE_JSON('{_q(json.dumps(traits))}')"
         else:
             traits_literal = "NULL"
@@ -160,11 +191,11 @@ def snowflake_identities(
 
 
 @pytest.fixture(scope="session")
-def parity_results(
+def snowflake_results(
     snowflake_session: Session,
     snowflake_identity_table: str,
     snowflake_identities: list[EngineTestCase],
-) -> dict[tuple[int, str], bool]:
+) -> dict[tuple[str, str], SegmentTestResult]:
     """Run every (case, segment) pair's translated SQL in one mega-query
     and return a `(case_idx, seg_key) -> bool` dict. Every case in the
     dataset compiles today (cases that need to fall back to the engine
@@ -173,32 +204,38 @@ def parity_results(
 
     One Snowflake round-trip for all 510 pairs.
     """
-    pairs: list[tuple[int, str, str, str]] = []
     select_clauses: list[str] = []
-    for case_idx, case in enumerate(snowflake_identities):
-        eval_ctx = case["context"]
-        env_key = eval_ctx["environment"]["key"]
-        for seg_key, segment in (eval_ctx.get("segments") or {}).items():
-            tr_ctx = TranslateContext(evaluation_context=eval_ctx, dialect=SnowflakeDialect())
-            sql = translate_segment(segment, tr_ctx)
+    results: dict[tuple[str, str], SegmentTestResult] = {}
+
+    for test_case in snowflake_identities:
+        evaluation_context = test_case["context"]
+        environment_key = evaluation_context["environment"]["key"]
+
+        for segment_key, segment in (evaluation_context.get("segments") or {}).items():
+            translate_context = TranslateContext(
+                evaluation_context=evaluation_context,
+                dialect=SnowflakeDialect(),
+            )
+            sql = translate_segment(segment, translate_context)
             assert sql is not None, (
-                f"case {case_idx} seg {seg_key} compiled to None — "
+                f"case {test_case['name']} seg {segment_key} unsupported — "
                 "either fix the translator or xfail the case by filename"
             )
-            pairs.append((case_idx, seg_key, sql, env_key))
+            pair_id = _q(test_case["name"] + _PAIR_SEP + segment_key)
+            select_clauses.append(
+                f"SELECT '{pair_id}' AS test_case_name_segment_key, "
+                f"EXISTS (SELECT 1 FROM {snowflake_identity_table} i "
+                f"WHERE i.environment_id = '{_q(environment_key)}' AND ({sql})) AS m"
+            )
 
-    for i, (_case_idx, _seg_key, sql, env_key) in enumerate(pairs):
-        env_lit = _q(env_key)
-        select_clauses.append(
-            f"SELECT {i} AS pair_id, "
-            f"EXISTS (SELECT 1 FROM {snowflake_identity_table} i "
-            f"WHERE i.environment_id = '{env_lit}' AND ({sql})) AS m"
+    rows = snowflake_session.sql("\nUNION ALL\n".join(select_clauses)).collect()
+
+    for row in rows:
+        test_case_name, segment_key = row["TEST_CASE_NAME_SEGMENT_KEY"].split(_PAIR_SEP, 1)
+        results[(test_case_name, segment_key)] = SegmentTestResult(
+            test_case_name=test_case_name,
+            segment_key=segment_key,
+            is_match=bool(row["M"]),
         )
 
-    results: dict[tuple[int, str], bool] = {}
-    rows = snowflake_session.sql("\nUNION ALL\n".join(select_clauses)).collect()
-    for row in rows:
-        i = int(row["PAIR_ID"])
-        case_idx, seg_key, _sql, _env = pairs[i]
-        results[(case_idx, seg_key)] = bool(row["M"])
     return results

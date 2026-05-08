@@ -1,12 +1,7 @@
 """Unit tests for the translator. No Snowflake required.
 
-Asserts SQL string shapes for representative segments. Useful as a fast
-sanity check before running the parity suite. The parity suite is the
-authoritative correctness check — these are about catching regressions
-in the translator's SQL generation, not engine equivalence.
+Asserts SQL string shapes for representative segments.
 """
-
-from __future__ import annotations
 
 from flag_engine.context.types import EvaluationContext
 
