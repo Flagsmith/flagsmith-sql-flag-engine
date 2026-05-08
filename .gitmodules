@@ -1,3 +1,4 @@
 [submodule "engine-test-data"]
 	path = engine-test-data
 	url = https://github.com/Flagsmith/engine-test-data.git
+	branch = v3.7.0
