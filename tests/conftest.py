@@ -33,6 +33,7 @@ import json5
 import pytest
 from flag_engine.context.types import EvaluationContext
 from flag_engine.result.types import EvaluationResult
+from snowflake.snowpark import Session
 
 from flagsmith_sql_flag_engine import TranslateContext, translate_segment
 from flagsmith_sql_flag_engine.dialects.snowflake import SnowflakeDialect
@@ -55,11 +56,10 @@ def _snowflake_creds_present() -> bool:
 
 
 @pytest.fixture(scope="session")
-def snowflake_session() -> Iterator[Any]:
+def snowflake_session() -> Iterator[Session]:
     """Snowpark session keyed off SNOWFLAKE_* env vars. Session-scoped."""
     if not _snowflake_creds_present():  # pragma: no cover - env-dependent skip
         pytest.skip("SNOWFLAKE_ACCOUNT / SNOWFLAKE_USER not set")
-    from snowflake.snowpark import Session
 
     config: dict[str, str] = {
         "account": os.environ["SNOWFLAKE_ACCOUNT"],

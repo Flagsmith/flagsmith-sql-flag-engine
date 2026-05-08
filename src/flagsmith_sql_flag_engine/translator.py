@@ -384,7 +384,10 @@ _SEMVER_OPS = {
 
 
 def _translate_trait_op(
-    ctx: TranslateContext, trait_key: str, op: ConditionOperator, val: object
+    ctx: TranslateContext,
+    trait_key: str,
+    op: ConditionOperator,
+    val: object,
 ) -> str | None:
     """Translate `op` on a literal trait key into SQL. Returns `None` for
     inputs the translator can't compile (e.g. RE2-unsafe regex)."""
@@ -424,28 +427,6 @@ def _translate_trait_op(
         return f"({path} IS NOT NULL AND {in_pred})"
 
     return _comparison(ctx, op, path, val, is_jsonpath=False)
-
-
-def _wrap_with_trait_first_dispatch(
-    ctx: TranslateContext, prop: str, fallback: str | None, cond: SegmentCondition
-) -> str | None:
-    """Wrap `fallback` with the engine's per-row trait-first dispatch:
-    if a row has a trait literally named `prop`, the trait predicate wins;
-    otherwise the JSONPath/static fallback applies. Mirrors
-    `flag_engine.segments.evaluator._get_context_value_getter`'s try-trait-
-    first behaviour for valid-JSONPath properties.
-
-    Returns `None` if either branch is untranslatable — caller falls back
-    to the engine for the whole segment, which handles trait shadowing
-    natively.
-    """
-    if fallback is None:
-        return None
-    trait_pred = _translate_trait_op(ctx, prop, cond["operator"], cond.get("value"))
-    if trait_pred is None:
-        return None
-    trait_path = ctx.trait_path(prop)
-    return f"IFF({trait_path} IS NOT NULL, {trait_pred}, {fallback})"
 
 
 def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | None:
@@ -531,37 +512,34 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     if classification.kind == "trait":
         return _translate_trait_op(ctx, prop, op, val)
 
-    # Non-trait classifications: compute the per-classification fallback,
-    # then wrap with engine's trait-first dispatch (a row whose traits
-    # include the literal prop value wins over the JSONPath / static
-    # resolution).
-    fallback: str | None
+    # Non-trait classifications. We don't replicate the engine's per-row
+    # trait-first dispatch (would roughly double the cost of every wrapped
+    # JSONPath condition); a row that happens to carry a trait literally
+    # named e.g. `$.identity` would shadow our resolution. Niche shape;
+    # parity suite xfails the one engine-test-data case that hits it.
     if classification.kind in ("identifier", "key"):
         path = ctx.jsonpath_expr(
             "$.identity.identifier" if classification.kind == "identifier" else "$.identity.key"
         )
         if op == "IS_SET":
-            fallback = "TRUE"
-        elif op == "IS_NOT_SET":
-            fallback = "FALSE"
-        else:
-            fallback = _comparison(ctx, op, path, val, is_jsonpath=True)
-    elif classification.kind == "identity_object":
+            return "TRUE"
+        if op == "IS_NOT_SET":
+            return "FALSE"
+        return _comparison(ctx, op, path, val, is_jsonpath=True)
+    if classification.kind == "identity_object":
         # `$.identity` — engine treats non-primitive lookups as "not set"
         # (deliberate: there's no operator that meaningfully takes an
         # object). So IS_SET → FALSE, IS_NOT_SET → TRUE, every scalar
         # comparator fail-casts on the dict → FALSE. The SQL answer is
         # the same for every row regardless of whether the eval context
         # carries an identity, so we encode it directly.
-        fallback = "TRUE" if op == "IS_NOT_SET" else "FALSE"
-    elif classification.kind == "untranslatable":
-        # Identity-bound JSONPath we can't map to row state — fall back to
-        # the engine for rows without a shadowing trait.
-        fallback = None
-    else:
-        # static
-        fallback = _engine_static_verdict(ctx, cond)
-    return _wrap_with_trait_first_dispatch(ctx, prop, fallback, cond)
+        return "TRUE" if op == "IS_NOT_SET" else "FALSE"
+    if classification.kind == "untranslatable":
+        # Identity-bound JSONPath we can't map to row state — caller falls
+        # back to the engine.
+        return None
+    # static
+    return _engine_static_verdict(ctx, cond)
 
 
 # ---------------------------------------------------------------------------

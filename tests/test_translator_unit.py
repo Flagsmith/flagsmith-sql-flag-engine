@@ -181,13 +181,10 @@ def test_translate_segment__jsonpath_identity_identifier__uses_column_directly()
     # When translated
     sql = translate_segment(seg, _ctx())
 
-    # Then the fallback branch references the identifier column directly
-    # (a trait-first IFF wrapper handles the engine's trait-shadowing
-    # semantics — a row with a trait literally named `$.identity.identifier`
-    # would win over the column ref).
+    # Then the predicate references the identifier column, not a trait path
     assert sql is not None
-    assert "i.identifier = 'x'" in sql
-    assert 'IFF(i.traits:"$.identity.identifier" IS NOT NULL' in sql
+    assert "i.identifier" in sql
+    assert "traits" not in sql
 
 
 def test_translate_segment__jsonpath_environment_name__uses_context_value() -> None:
@@ -212,40 +209,10 @@ def test_translate_segment__jsonpath_environment_name__uses_context_value() -> N
     # When translated
     sql = translate_segment(seg, _ctx(env_name="Production"))
 
-    # Then the fallback branch collapses to a SQL constant — the env name
-    # is fixed for every row, so the translator pre-computes the engine's
-    # verdict via `is_context_in_segment`. A trait-first IFF wrapper still
-    # gates the static answer behind a trait-shadowing check.
-    assert sql is not None
-    assert sql.endswith(", TRUE)))")
-    assert 'IFF(i.traits:"$.environment.name" IS NOT NULL' in sql
-
-
-def test_translate_segment__unsafe_regex_on_jsonpath__returns_none() -> None:
-    # Given a REGEX with an RE2-unsafe pattern (backreference) on a JSONPath
-    # property — the trait-first dispatch wrapper depends on a translatable
-    # trait predicate; if the trait branch can't compile the regex either,
-    # the whole condition is untranslatable
-    seg = {
-        "key": "rx1",
-        "name": "s",
-        "rules": [
-            {
-                "type": "ALL",
-                "conditions": [
-                    {
-                        "operator": "REGEX",
-                        "property": "$.environment.name",
-                        "value": r"(foo)\1",
-                    }
-                ],
-            }
-        ],
-    }
-
-    # When / Then the translator declines (caller falls back to the engine,
-    # which catches the regex error and returns False)
-    assert translate_segment(seg, _ctx()) is None
+    # Then the predicate collapses to a SQL constant — the env name is fixed
+    # for every row in the resulting query, so the translator pre-computes
+    # the engine's verdict via `is_context_in_segment`.
+    assert sql == "((TRUE))"
 
 
 def test_translate_segment__regex_with_backreference__returns_none() -> None:
@@ -603,11 +570,8 @@ def test_translate_segment__is_set_on_identity_identifier__emits_true() -> None:
         ],
     }
 
-    # When / Then the fallback branch is TRUE; a trait-first IFF wrapper
-    # gates it behind a shadowing check
-    sql = translate_segment(seg, _ctx())
-    assert sql is not None
-    assert sql.endswith(", TRUE)))")
+    # When / Then the predicate collapses to TRUE
+    assert translate_segment(seg, _ctx()) == "((TRUE))"
 
 
 def test_translate_segment__is_not_set_on_identity_key__emits_false() -> None:
@@ -625,11 +589,8 @@ def test_translate_segment__is_not_set_on_identity_key__emits_false() -> None:
         ],
     }
 
-    # When / Then the fallback branch is FALSE (every row's identity has
-    # a key); a trait-first IFF wrapper gates it behind a shadowing check.
-    sql = translate_segment(seg, _ctx())
-    assert sql is not None
-    assert sql.endswith(", FALSE)))")
+    # When / Then the predicate collapses to FALSE
+    assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 def test_translate_segment__not_equal_on_identity_identifier__emits_inequality() -> None:
@@ -715,12 +676,9 @@ def test_translate_segment__comparison_with_none_value__compiles_to_false() -> N
         ],
     }
 
-    # When / Then the fallback branch is FALSE (engine treats null value
-    # as a cast failure → returns False); a trait-first IFF wrapper still
-    # gates it behind a shadowing check.
-    sql = translate_segment(seg, _ctx())
-    assert sql is not None
-    assert sql.endswith(", FALSE)))")
+    # When / Then the predicate collapses to FALSE (engine treats null value
+    # as a cast failure → returns False)
+    assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 # --- coverage: rule composition ---

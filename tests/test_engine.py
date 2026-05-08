@@ -26,6 +26,13 @@ XFAIL_CASE_FILENAMES = {
     # semver-sort-key collapses to major.minor.patch only.
     "test_semver_greater_than_prerelease__should_match.jsonc",
     "test_semver_less_than_prerelease__should_match.jsonc",
+    # Engine does trait-first dispatch: a row with a trait literally named
+    # `$.identity` shadows the JSONPath lookup. Replicating per-row trait
+    # fallback in SQL roughly doubles the cost of every wrapped JSONPath
+    # condition (Snowflake evaluates both IFF arms), so we accept the
+    # divergence on this niche shape (`$.`-prefixed trait names) and let
+    # callers fall back to the engine.
+    "test_jsonpath_like_trait__existing_jsonpath__should_match_trait.jsonc",
 }
 
 
