@@ -41,6 +41,7 @@ from flag_engine.context.types import (
     SegmentRule,
 )
 from flag_engine.segments.evaluator import is_context_in_segment
+from flag_engine.segments.types import ConditionOperator
 
 from flagsmith_sql_flag_engine.dialect import Dialect
 from flagsmith_sql_flag_engine.utils import (
@@ -50,7 +51,7 @@ from flagsmith_sql_flag_engine.utils import (
     string_literal,
 )
 
-TRANSLATABLE_OPERATORS: frozenset[str] = frozenset(
+TRANSLATABLE_OPERATORS: frozenset[ConditionOperator] = frozenset(
     {
         "EQUAL",
         "NOT_EQUAL",
@@ -202,7 +203,12 @@ def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:
 
 
 JsonpathKind = Literal[
-    "identifier", "key", "trait", "identity_object", "untranslatable", "static"
+    "identifier",
+    "key",
+    "trait",
+    "identity_object",
+    "untranslatable",
+    "static",
 ]
 
 
@@ -367,6 +373,81 @@ def _comparison(
 # ---------------------------------------------------------------------------
 
 
+_SEMVER_OPS = {
+    "EQUAL": "=",
+    "NOT_EQUAL": "<>",
+    "GREATER_THAN": ">",
+    "LESS_THAN": "<",
+    "GREATER_THAN_INCLUSIVE": ">=",
+    "LESS_THAN_INCLUSIVE": "<=",
+}
+
+
+def _translate_trait_op(
+    ctx: TranslateContext, trait_key: str, op: ConditionOperator, val: object
+) -> str | None:
+    """Translate `op` on a literal trait key into SQL. Returns `None` for
+    inputs the translator can't compile (e.g. RE2-unsafe regex)."""
+    path = ctx.trait_path(trait_key)
+    if op == "IS_SET":
+        return f"{path} IS NOT NULL"
+    if op == "IS_NOT_SET":
+        return f"{path} IS NULL"
+
+    # Semver-marked comparator (segment value ends with `:semver`). Engine
+    # only invokes its semver path for the comparators below; other operators
+    # treat the `:semver` suffix as ordinary string content, which is what
+    # the fall-through handlers already do.
+    if isinstance(val, str) and val.endswith(":semver") and op in _SEMVER_OPS:
+        bare = val[:-7]
+        bare_lit = string_literal(bare)
+        col_str = ctx.dialect.cast_string(path)
+        return (
+            f"({path} IS NOT NULL AND "
+            f"{_semver_sort_key_expr(ctx, col_str)} {_SEMVER_OPS[op]} "
+            f"{_semver_sort_key_expr(ctx, bare_lit)})"
+        )
+
+    # Type-aware comparators on traits — delegate to the dialect, since the
+    # discriminator (TYPEOF / IS_*), runtime type-coercion casts, and
+    # short-circuit pitfalls are all engine-specific.
+    if op in {"EQUAL", "NOT_EQUAL"} and val is not None:
+        negate = op == "NOT_EQUAL"
+        eq_pred = ctx.dialect.trait_eq(ctx.identities_alias, trait_key, val, negate=negate)
+        return f"({path} IS NOT NULL AND {eq_pred})"
+    if op == "IN":
+        items = _engine_in_values(val)
+        if items is None:
+            # Bad IN value (non-string, non-list) — engine returns False.
+            return "FALSE"
+        in_pred = ctx.dialect.trait_in(ctx.identities_alias, trait_key, items)
+        return f"({path} IS NOT NULL AND {in_pred})"
+
+    return _comparison(ctx, op, path, val, is_jsonpath=False)
+
+
+def _wrap_with_trait_first_dispatch(
+    ctx: TranslateContext, prop: str, fallback: str | None, cond: SegmentCondition
+) -> str | None:
+    """Wrap `fallback` with the engine's per-row trait-first dispatch:
+    if a row has a trait literally named `prop`, the trait predicate wins;
+    otherwise the JSONPath/static fallback applies. Mirrors
+    `flag_engine.segments.evaluator._get_context_value_getter`'s try-trait-
+    first behaviour for valid-JSONPath properties.
+
+    Returns `None` if either branch is untranslatable — caller falls back
+    to the engine for the whole segment, which handles trait shadowing
+    natively.
+    """
+    if fallback is None:
+        return None
+    trait_pred = _translate_trait_op(ctx, prop, cond["operator"], cond.get("value"))
+    if trait_pred is None:
+        return None
+    trait_path = ctx.trait_path(prop)
+    return f"IFF({trait_path} IS NOT NULL, {trait_pred}, {fallback})"
+
+
 def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | None:
     op = cond["operator"]
     if op not in TRANSLATABLE_OPERATORS:
@@ -382,9 +463,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
     # bypass the JSONPath compile — they're classified as a literal trait
     # lookup directly.
     classification = (
-        _classify_jsonpath(prop)
-        if prop.startswith("$.")
-        else JsonpathClassification("trait", prop)
+        _classify_jsonpath(prop) if prop.startswith("$.") else JsonpathClassification("trait", prop)
     )
     if classification.kind == "trait":
         # Trait keys carried via `$.identity.traits.<x>` arrive normalised
@@ -449,81 +528,40 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         # nothing, the comparator's cast fails, returns False.
         return "FALSE"
 
+    if classification.kind == "trait":
+        return _translate_trait_op(ctx, prop, op, val)
+
+    # Non-trait classifications: compute the per-classification fallback,
+    # then wrap with engine's trait-first dispatch (a row whose traits
+    # include the literal prop value wins over the JSONPath / static
+    # resolution).
+    fallback: str | None
     if classification.kind in ("identifier", "key"):
         path = ctx.jsonpath_expr(
             "$.identity.identifier" if classification.kind == "identifier" else "$.identity.key"
         )
         if op == "IS_SET":
-            return "TRUE"
-        if op == "IS_NOT_SET":
-            return "FALSE"
-        return _comparison(ctx, op, path, val, is_jsonpath=True)
-    if classification.kind == "identity_object":
+            fallback = "TRUE"
+        elif op == "IS_NOT_SET":
+            fallback = "FALSE"
+        else:
+            fallback = _comparison(ctx, op, path, val, is_jsonpath=True)
+    elif classification.kind == "identity_object":
         # `$.identity` — engine treats non-primitive lookups as "not set"
         # (deliberate: there's no operator that meaningfully takes an
         # object). So IS_SET → FALSE, IS_NOT_SET → TRUE, every scalar
         # comparator fail-casts on the dict → FALSE. The SQL answer is
         # the same for every row regardless of whether the eval context
         # carries an identity, so we encode it directly.
-        if op == "IS_NOT_SET":
-            return "TRUE"
-        return "FALSE"
-    if classification.kind == "untranslatable":
-        # Identity-bound JSONPath we can't map to row state — caller falls
-        # back to the engine.
-        return None
-    if classification.kind == "static":
-        return _engine_static_verdict(ctx, cond)
-    # `kind == "trait"` — fall through to the trait branch below with
-    # `prop` already rewritten to the bare trait key.
-
-    # Trait-bound predicates: the dialect knows how to extract traits from
-    # whatever shape it stores them in (Snowflake's VARIANT column today,
-    # Postgres JSONB or a long-form table tomorrow).
-    path = ctx.trait_path(prop)
-    if op == "IS_SET":
-        return f"{path} IS NOT NULL"
-    if op == "IS_NOT_SET":
-        return f"{path} IS NULL"
-
-    # Semver-marked comparator (segment value ends with `:semver`). Engine
-    # only invokes its semver path for the comparators below; other operators
-    # treat the `:semver` suffix as ordinary string content, which is what
-    # the fall-through handlers already do.
-    _SEMVER_OPS = {
-        "EQUAL": "=",
-        "NOT_EQUAL": "<>",
-        "GREATER_THAN": ">",
-        "LESS_THAN": "<",
-        "GREATER_THAN_INCLUSIVE": ">=",
-        "LESS_THAN_INCLUSIVE": "<=",
-    }
-    if isinstance(val, str) and val.endswith(":semver") and op in _SEMVER_OPS:
-        bare = val[:-7]
-        bare_lit = string_literal(bare)
-        col_str = ctx.dialect.cast_string(path)
-        return (
-            f"({path} IS NOT NULL AND "
-            f"{_semver_sort_key_expr(ctx, col_str)} {_SEMVER_OPS[op]} "
-            f"{_semver_sort_key_expr(ctx, bare_lit)})"
-        )
-
-    # Type-aware comparators on traits — delegate to the dialect, since the
-    # discriminator (TYPEOF / IS_*), runtime type-coercion casts, and
-    # short-circuit pitfalls are all engine-specific.
-    if op in {"EQUAL", "NOT_EQUAL"} and val is not None:
-        negate = op == "NOT_EQUAL"
-        eq_pred = ctx.dialect.trait_eq(ctx.identities_alias, prop, val, negate=negate)
-        return f"({path} IS NOT NULL AND {eq_pred})"
-    if op == "IN":
-        items = _engine_in_values(val)
-        if items is None:
-            # Bad IN value (non-string, non-list) — engine returns False.
-            return "FALSE"
-        in_pred = ctx.dialect.trait_in(ctx.identities_alias, prop, items)
-        return f"({path} IS NOT NULL AND {in_pred})"
-
-    return _comparison(ctx, op, path, val, is_jsonpath=False)
+        fallback = "TRUE" if op == "IS_NOT_SET" else "FALSE"
+    elif classification.kind == "untranslatable":
+        # Identity-bound JSONPath we can't map to row state — fall back to
+        # the engine for rows without a shadowing trait.
+        fallback = None
+    else:
+        # static
+        fallback = _engine_static_verdict(ctx, cond)
+    return _wrap_with_trait_first_dispatch(ctx, prop, fallback, cond)
 
 
 # ---------------------------------------------------------------------------
