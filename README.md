@@ -19,7 +19,7 @@ from flagsmith_sql_flag_engine import TranslateContext, translate_segment
 from flagsmith_sql_flag_engine.dialects import SnowflakeDialect
 
 eval_context: EvaluationContext = {
-    "environment": {"key": "n9fbf9h3v4fFgH3U3ngWhb", "name": "Production"},
+    "environment": {"key": "n9fbf9...3ngWhb", "name": "Production"},
 }
 ctx = TranslateContext(evaluation_context=eval_context, dialect=SnowflakeDialect())
 
@@ -38,7 +38,7 @@ segment: SegmentContext = {
 where_expr = translate_segment(segment, ctx)
 # where_expr is a SQL string. Drop into:
 #   SELECT COUNT(*) FROM IDENTITIES i
-#   WHERE i.environment_id = 'n9fbf9h3v4fFgH3U3ngWhb' AND ({where_expr})
+#   WHERE i.environment_id = 'n9fbf9...3ngWhb' AND ({where_expr})
 ```
 
 `environment_id` in the `IDENTITIES` table is a string column holding
