@@ -17,6 +17,8 @@ jobs:
       SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
       SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_PRIVATE_KEY_PATH: /tmp/snowflake_pk.p8
+      CLICKHOUSE_HOST: localhost
+      CLICKHOUSE_PORT: "8123"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -30,6 +32,8 @@ jobs:
         run: |
           umask 077
           printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > /tmp/snowflake_pk.p8
+      - name: Start ClickHouse
+        run: docker compose up --detach --wait clickhouse
       - run: make test
       - name: Check Coverage
         uses: 5monkeys/cobertura-action@v14

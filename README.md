@@ -112,13 +112,8 @@ export SNOWFLAKE_ACCOUNT=...
 export SNOWFLAKE_USER=...
 export SNOWFLAKE_PRIVATE_KEY_PATH=...
 
-# ClickHouse (bring up a local container first)
-docker run -d --rm --name clickhouse-parity \
-    -p 18123:8123 \
-    -e CLICKHOUSE_SKIP_USER_SETUP=1 \
-    clickhouse/clickhouse-server:latest
-export CLICKHOUSE_HOST=localhost
-export CLICKHOUSE_PORT=18123
+# ClickHouse — bring up the local container the CI workflow also uses
+docker compose up --detach --wait clickhouse
 
 uv run pytest tests/test_engine.py
 ```
