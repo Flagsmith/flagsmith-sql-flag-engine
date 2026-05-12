@@ -67,16 +67,31 @@ CREATE TABLE IF NOT EXISTS IDENTITIES (
 CLUSTER BY (environment_id, id);
 ```
 
-Run this DDL to create the table the translator emits against. Trait
-keys are *data* inside the VARIANT, so new keys appear without schema
-changes; at query time, trait lookups are a single columnar read with
-subkey extraction.
+For ClickHouse:
+
+```sql
+CREATE TABLE IF NOT EXISTS IDENTITIES (
+    environment_id String,
+    id UInt64,
+    identifier String,
+    identity_key String,
+    traits Nullable(String)
+)
+ENGINE = MergeTree()
+ORDER BY (environment_id, id);
+```
+
+The Snowflake table stores traits in a single `VARIANT` column; the
+ClickHouse table stores the JSON-encoded trait map in a `Nullable(String)`
+column read via `JSONExtract*`. Either way, trait keys are *data* — new
+keys appear without schema changes — and the translator only sees the
+abstract path extraction.
 
 Programmatic access:
 
 ```python
-from flagsmith_sql_flag_engine.dialects.snowflake import SCHEMA_DDL
-print(SCHEMA_DDL)
+from flagsmith_sql_flag_engine.dialects.snowflake import SCHEMA_DDL as SNOWFLAKE_DDL
+from flagsmith_sql_flag_engine.dialects.clickhouse import SCHEMA_DDL as CLICKHOUSE_DDL
 ```
 
 ## Engine parity
@@ -91,11 +106,26 @@ To run the engine-parity suite locally:
 
 ```bash
 git submodule update --init                 # pull engine-test-data
+
+# Snowflake
 export SNOWFLAKE_ACCOUNT=...
 export SNOWFLAKE_USER=...
 export SNOWFLAKE_PRIVATE_KEY_PATH=...
-uv run pytest -m engine_parity
+
+# ClickHouse (bring up a local container first)
+docker run -d --rm --name clickhouse-parity \
+    -p 18123:8123 \
+    -e CLICKHOUSE_SKIP_USER_SETUP=1 \
+    clickhouse/clickhouse-server:latest
+export CLICKHOUSE_HOST=localhost
+export CLICKHOUSE_PORT=18123
+
+uv run pytest tests/test_engine.py
 ```
+
+Each harness's environment variables are only read at session-create
+time; to run a single dialect's parity, pass e.g. `-k snowflake` or
+`-k clickhouse` and only export that dialect's credentials.
 
 Adding a new dialect's parity coverage is one harness module — see
 `tests/harnesses/` for the shape.
@@ -105,9 +135,42 @@ Adding a new dialect's parity coverage is one harness module — see
 The translator is dialect-aware: a `Dialect` protocol abstracts the
 SQL fragments that differ across SQL engines — MD5 hex, hex-to-int
 parsing, prefix-anchored regex, padded-version comparison, type-aware
-trait predicates, regex flavour. Today only `SnowflakeDialect` is
-implemented; adding another engine such as DuckDB or Postgres means
-writing one class.
+trait predicates, regex flavour. Today `SnowflakeDialect` and
+`ClickHouseDialect` are implemented; adding another engine such as
+DuckDB or Postgres means writing one class.
+
+### Snowflake vs ClickHouse
+
+Both dialects pass the engine-parity suite with the same two xfails
+(prerelease semver sort and `$.`-prefixed trait names — translator-level
+divergences shared by every dialect). Operator coverage is identical.
+
+The shape of the two implementations differs because the engines do:
+
+| Concern              | Snowflake                                | ClickHouse                                                  |
+| -------------------- | ---------------------------------------- | ----------------------------------------------------------- |
+| Trait storage        | `VARIANT` (columnar JSON)                | `Nullable(String)` JSON read via `JSONExtract*`             |
+| Trait path           | `i.traits:"key"` returns VARIANT         | `if(JSONType=Null, NULL, ...)` returning canonical string   |
+| Type discrimination  | `TYPEOF`, `IS_BOOLEAN`, `IS_DECIMAL`     | `JSONType` (Enum8) — exact type names                       |
+| Hex chunk parse      | `TO_NUMBER(SUBSTR(...), 'XXXXXXXX')`     | `reinterpretAsUInt32(reverse(unhex(substring(...))))`       |
+| Anchored regex       | `REGEXP_INSTR(value, pat) = 1`           | `match(value, '^(pat)')` — `match` is unanchored            |
+| Numeric coalesce     | Lossless string fast path via VARIANT::STRING | Per-type dispatch — no analogous canonical stringify   |
+| Nullable propagation | `(VARIANT NULL)::STRING → NULL`          | `Nullable(String)` is explicit; regex funcs reject it       |
+
+Practical implications for callers:
+
+- ClickHouse's `match`, `extractAll` reject `Nullable(String)` input
+  because the implied result types are unrepresentable. The dialect
+  wraps regex value expressions in `ifNull(..., '')`; trait paths are
+  always guarded by `IS NOT NULL` upstream, so the default is
+  unreachable at runtime.
+- Snowflake's VARIANT path collapses both missing keys and JSON null to
+  SQL NULL "by accident" (cast propagation). The ClickHouse dialect
+  collapses both explicitly via `JSONType = 'Null'`. Caller-visible
+  behaviour is the same.
+- ClickHouse's batched `EXISTS`-equivalent uses windowed `count() > 0`
+  inside a `UNION ALL` — `EXISTS (SELECT 1 FROM ...)` isn't a top-level
+  expression in ClickHouse the way it is in Snowflake.
 
 ## Operator coverage
 

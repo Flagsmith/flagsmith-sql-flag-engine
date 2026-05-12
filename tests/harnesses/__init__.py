@@ -9,9 +9,10 @@ from tests.harnesses._base import (
     EvaluationCase,
     IdentityRow,
 )
+from tests.harnesses.clickhouse import ClickHouseHarness
 from tests.harnesses.snowflake import SnowflakeHarness
 
-HARNESSES: list[DialectTestHarness] = [SnowflakeHarness()]
+HARNESSES: list[DialectTestHarness] = [SnowflakeHarness(), ClickHouseHarness()]
 
 __all__ = [
     "DialectTestHarness",
