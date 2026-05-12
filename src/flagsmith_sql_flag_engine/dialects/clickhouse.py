@@ -42,13 +42,17 @@ typical Flagsmith trait vocabularies; we should monitor.
     unquoted strings, decimal digits for numerics, and `'true'` /
     `'false'` for bools.
 
-  - `trait_eq` and `trait_in` dispatch on typed-variant subcolumns
-    (``i.traits.`key`.:String``, ``.:Int64``, ``.:Float64``, ``.:Bool``).
-    Each accessor returns NULL when the JSON value is the wrong type,
-    so OR-of-typed-compares naturally implements the engine's
-    "cast succeeded AND values matched" semantics. JSON numerics may
-    surface as Int64, UInt64, or Float64 depending on the literal's
-    shape, so the numeric branches accept all three.
+  - `trait_eq` (positive) leads with a `toString(<sub>) = <lit>` fast
+    path — covers String + canonical-stringified Int / UInt / Float +
+    lowercase Bool in one subcolumn read. A typed-variant Bool branch
+    (``<sub>.:Bool = <target>``) picks up Python-bool-repr "True" /
+    "False" coercions, and a `toFloat64OrNull(toString(<sub>))` branch
+    catches floats whose canonical toString integer-trims (1.0 → '1').
+    Mirrors Snowflake's `v::STRING` fast path. `NOT_EQUAL` still does
+    explicit per-type dispatch via typed-variant subcolumns
+    (``.:String``, ``.:Int64``, ``.:UInt64``, ``.:Float64``, ``.:Bool``);
+    each accessor is NULL when the JSON value is the wrong type, which
+    matches the engine's "cast failed → False" semantics.
 
   - Anchored regex uses `match(value, '^(...)')` — ClickHouse's `match`
     is RE2 and unanchored, so we prepend `^` to mirror Python's
@@ -168,25 +172,32 @@ class ClickHouseDialect:
         except (ValueError, TypeError):
             float_lit = None
 
-        str_sub = f"{sub}.:String"
-        int_sub = f"{sub}.:Int64"
-        uint_sub = f"{sub}.:UInt64"
-        float_sub = f"{sub}.:Float64"
+        # `toString(<sub>)` returns the JSON value's canonical string form
+        # in a single subcolumn read — 'x' for String, '42' for Int / UInt,
+        # '3.14' for Float, 'true' / 'false' for Bool. Mirrors Snowflake's
+        # `v::STRING` and lets us collapse the typical match path to one
+        # comparison instead of an OR across five typed-variant subcolumns.
+        str_path = f"toString({sub})"
         bool_sub = f"{sub}.:Bool"
 
         if not negate:
-            # OR-of-typed-equals. Each `.:Type` accessor returns NULL when
-            # the JSON value is the wrong type, so unrelated branches
-            # short-circuit to NULL (false in WHERE).
-            clauses = [f"({str_sub} = {str_lit})"]
+            # Fast path: covers String + canonical-stringified Int / UInt /
+            # Float + lowercase Bool ('true' / 'false') in one branch.
+            clauses = [f"({str_path} = {str_lit})"]
+            # Bool branch: engine treats any segment value except "False" /
+            # "false" as bool True, so a JSON true trait must match e.g.
+            # `EQUAL("flag", "growth")`. The fast path catches the
+            # lowercase case; this branch picks up Python-bool-repr "True"
+            # / "False" and any other coercion that doesn't string-match
+            # 'true' / 'false' directly.
             clauses.append(f"({bool_sub} = {bool_target})")
-            num_lit = int_lit if int_lit is not None else float_lit
-            if num_lit is not None:
-                # Match across Int64 / UInt64 / Float64 — JSON numerics can
-                # surface as any of the three depending on the literal shape.
-                clauses.append(
-                    f"({int_sub} = {num_lit} OR {uint_sub} = {num_lit} OR {float_sub} = {num_lit})"
-                )
+            # Float branch: floats whose `toString` integer-trims (1.0 →
+            # '1') miss the fast path against a `'1.0'` segment value.
+            # `toFloat64OrNull(str_path)` covers Int / UInt / Float
+            # uniformly; non-numeric traits stringify to something
+            # `toFloat64OrNull` rejects → NULL → no match.
+            if float_lit is not None and float_lit != str_value:
+                clauses.append(f"(toFloat64OrNull({str_path}) = {float_lit})")
             return "(" + " OR ".join(clauses) + ")"
 
         # NOT_EQUAL: per-type dispatch. Engine returns True only when the
@@ -194,6 +205,10 @@ class ClickHouseDialect:
         # <> lit` encodes that directly; types where the segment value can't
         # cast contribute FALSE.
         no_match = "FALSE"
+        str_sub = f"{sub}.:String"
+        int_sub = f"{sub}.:Int64"
+        uint_sub = f"{sub}.:UInt64"
+        float_sub = f"{sub}.:Float64"
         bool_branch = f"({bool_sub} IS NOT NULL AND {bool_sub} <> {bool_target})"
         if int_lit is not None or float_lit is not None:
             num_lit = int_lit if int_lit is not None else float_lit
@@ -209,19 +224,19 @@ class ClickHouseDialect:
         )
 
     def trait_in(self, alias: str, trait_key: str, items: list[str]) -> str:
-        # String traits match items directly; integer traits stringify
-        # before compare. Bool / float / array traits never match per
-        # engine semantics, so they sit outside the gate.
+        # `toString(<sub>)` returns the canonical string form for any JSON
+        # value type in a single subcolumn read. Engine semantics only
+        # match String and integer trait types — bool / float / array
+        # traits never match — so we gate the toString-based IN compare on
+        # `.:Bool IS NULL AND .:Float64 IS NULL`. Int / UInt traits pass
+        # because their stringified form ('42') matches the item literals;
+        # missing keys propagate NULL through toString and fail the IN.
         sub = self._sub(alias, trait_key)
-        str_sub = f"{sub}.:String"
-        int_sub = f"{sub}.:Int64"
-        uint_sub = f"{sub}.:UInt64"
+        bool_sub = f"{sub}.:Bool"
+        float_sub = f"{sub}.:Float64"
+        str_path = f"toString({sub})"
         item_lits = ",".join(string_literal(v) for v in items)
-        return (
-            f"(({str_sub} IS NOT NULL AND {str_sub} IN ({item_lits}))"
-            f" OR ({int_sub} IS NOT NULL AND toString({int_sub}) IN ({item_lits}))"
-            f" OR ({uint_sub} IS NOT NULL AND toString({uint_sub}) IN ({item_lits})))"
-        )
+        return f"({bool_sub} IS NULL AND {float_sub} IS NULL AND {str_path} IN ({item_lits}))"
 
     # ----- string operations -----
 
