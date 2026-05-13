@@ -90,7 +90,7 @@ abstract path extraction.
 
 ClickHouse Cloud requires `SET allow_experimental_json_type = 1` when
 creating a `JSON`-column table (the type is GA on OSS 25.x); the
-harness and bench apply this setting automatically.
+test harness applies this setting automatically.
 
 Programmatic access:
 
@@ -151,8 +151,8 @@ The shape of the two implementations differs because the engines do:
 | -------------------- | ---------------------------------------- | ----------------------------------------------------------- |
 | Trait storage        | `VARIANT` (columnar JSON)                | `JSON` (CH 24+, columnar JSON with typed subcolumns)        |
 | Trait path           | `i.traits:"key"` returns VARIANT         | ``i.traits.`key` `` returns Dynamic                         |
-| Type discrimination  | `TYPEOF`, `IS_BOOLEAN`, `IS_DECIMAL`     | Typed-variant subcolumns ``.:String``, ``.:Int64``, ``.:Bool`` |
-| Hex chunk parse      | `TO_NUMBER(SUBSTR(...), 'XXXXXXXX')`     | `reinterpretAsUInt32(reverse(substring(MD5(...), n, 4)))`  |
+| Type discrimination  | `TYPEOF`, `IS_BOOLEAN`, `IS_DECIMAL`     | `toString(<sub>)` canonical-form fast path + typed-variant subcolumns (``.:String``, ``.:Bool``, ``.:Float64``) for type-strict dispatch |
+| Hex chunk parse      | `TO_NUMBER(SUBSTR(hex, n, 8), 'XXXXXXXX')` | `reinterpretAsUInt32(reverse(substring(MD5(...), n, 4)))` over raw bytes; no hex round-trip |
 | Anchored regex       | `REGEXP_INSTR(value, pat) = 1`           | `match(value, '^(pat)')` — `match` is unanchored            |
 | Nullable propagation | `(VARIANT NULL)::STRING → NULL`          | Subcolumn returns Dynamic NULL; `IS NULL` short-circuits    |
 
