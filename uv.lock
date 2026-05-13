@@ -588,7 +588,7 @@ wheels = [
 
 [[package]]
 name = "flagsmith-sql-flag-engine"
-version = "0.1.0"
+version = "0.1.0a2"
 source = { editable = "." }
 dependencies = [
     { name = "flagsmith-flag-engine" },
