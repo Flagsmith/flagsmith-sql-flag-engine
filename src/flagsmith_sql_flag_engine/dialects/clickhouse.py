@@ -4,28 +4,50 @@
 
 The translator emits predicates against a single `IDENTITIES` table —
 four typed columns `environment_id`, `id`, `identifier`, `identity_key`,
-plus one `Nullable(String)` column `traits` holding the identity's full
-trait map as a JSON-encoded string. Trait keys are JSON keys, not schema
-columns.
+plus one `JSON` column `traits` holding the identity's full trait map
+in ClickHouse's native columnar JSON layout. Trait keys are JSON paths
+on the column, not schema columns.
 
-`String` was chosen over the experimental `JSON` type because:
+The `JSON` type was chosen over `Nullable(String)` + `JSONExtract*`
+because:
 
-  - It works on every supported ClickHouse version, including LTS.
-  - `JSONExtract*` is the supported way to read JSON values out of a
-    `String` column; the functions are vectorised and unwind to a
-    columnar plan when the same key is referenced across rows.
+  - It stores each path as a typed subcolumn, so trait reads are a
+    direct columnar scan — no per-row JSON parse. Empirically: at 870M
+    rows on a Cloud trial, simple/multi predicates dropped from 14-20×
+    slower than Snowflake VARIANT to within 2.5-4×. The wide-String
+    variant scales linearly with row count where Snowflake / `JSON`
+    stay near-flat.
+  - Schema evolution is implicit: new trait keys appear as new
+    subcolumns at INSERT time, no DDL change.
+  - It matches Snowflake `VARIANT`'s semantic model — same NULL-on-miss
+    behaviour, same type discrimination, same path syntax cost shape.
+
+The trade-off is that ClickHouse caps `max_dynamic_paths` per JSON
+column (default 1024). Above that, additional paths spill into a
+`Dynamic` catch-all and lose the columnar fast path. This is fine for
+typical Flagsmith trait vocabularies; we should monitor.
 
 ## Notable choices
 
-  - `JSONExtractRaw` returns the empty string when the key is missing;
-    `trait_path` wraps that in `nullIf(..., '')` so the translator's
-    `IS NULL` / `IS NOT NULL` checks behave like Snowflake's VARIANT.
-    A trait whose value is the JSON string `""` round-trips as `'""'`
-    (with quotes) so the disambiguation is safe.
+  - Subcolumn access uses backtick-quoted identifiers: ``i.traits.`key` ``.
+    Backticks are doubled to escape; arbitrary trait keys including
+    spaces and dots are supported. CH's `getSubcolumn(json, 'key')`
+    function works but doesn't compose with the typed-variant `.:Type`
+    accessor, so we standardise on backtick form everywhere.
 
-  - `trait_eq` and `trait_in` dispatch on `JSONType(traits, key)` —
-    ClickHouse's native discriminator. JSON numeric values may surface
-    as `'Int64'`, `'UInt64'`, or `'Double'` depending on the value's
+  - `trait_path` returns the trait's canonical string form via
+    `toString(<sub>)`, with a leading `IS NULL` guard so missing keys
+    and JSON null surface as SQL NULL. Mirrors Snowflake's `::STRING`
+    semantics — downstream regex / position / compare paths get
+    unquoted strings, decimal digits for numerics, and `'true'` /
+    `'false'` for bools.
+
+  - `trait_eq` and `trait_in` dispatch on typed-variant subcolumns
+    (``i.traits.`key`.:String``, ``.:Int64``, ``.:Float64``, ``.:Bool``).
+    Each accessor returns NULL when the JSON value is the wrong type,
+    so OR-of-typed-compares naturally implements the engine's
+    "cast succeeded AND values matched" semantics. JSON numerics may
+    surface as Int64, UInt64, or Float64 depending on the literal's
     shape, so the numeric branches accept all three.
 
   - Anchored regex uses `match(value, '^(...)')` — ClickHouse's `match`
@@ -37,17 +59,21 @@ columns.
     we `nullIf(..., '')` to keep the engine's "no n-th run" → NULL
     contract.
 
-  - Hex-to-int parsing uses `reinterpretAsUInt32(reverse(unhex(...)))`.
-    `unhex` returns the 4-byte buffer for an 8-char hex slice;
-    `reinterpretAsUInt32` reads little-endian, so we `reverse` first
-    to get the big-endian value the engine expects.
-"""
+  - Hex-chunk parsing reads directly from the raw 16-byte MD5 output
+    rather than round-tripping through hex. `MD5(expr)` returns a
+    `FixedString(16)`; `reinterpretAsUInt32(reverse(substring(...)))`
+    pulls a big-endian UInt32 out of any 4-byte slice. Skipping the
+    `hex(MD5(...))` → `unhex(substring(...))` round-trip is a small but
+    consistent speedup on `% Split`-heavy predicates.
+
+## Setup
+
+`JSON` type DDL requires `SET allow_experimental_json_type = 1` on
+ClickHouse Cloud as of 25.12 (no longer experimental on OSS 25.x).
+Callers should apply this setting at session creation."""
 
 from flagsmith_sql_flag_engine.utils import re2_safe, string_literal
 
-# Canonical IDENTITIES schema the translator emits against. The translator
-# checks trait presence via `IS NULL` / `IS NOT NULL`, so `traits` is
-# `Nullable(String)` to match Snowflake's nullable `VARIANT`.
 SCHEMA_DDL = """\
 CREATE TABLE IF NOT EXISTS IDENTITIES (
     -- environment.key from EnvironmentContext; used as the env partition
@@ -62,28 +88,28 @@ CREATE TABLE IF NOT EXISTS IDENTITIES (
     -- the composite identity key, exposed as $.identity.key
     identity_key String,
 
-    -- the identity's full trait map JSON-encoded:
-    -- {"plan": "growth", "country": "GB", ...}. NULL when the identity
-    -- has no traits.
-    traits Nullable(String)
+    -- the identity's full trait map. ClickHouse's `JSON` type stores each
+    -- path as a typed subcolumn so trait lookups are columnar reads, not
+    -- per-row JSON parses. SQL NULL for an identity with no traits.
+    traits JSON
 )
 ENGINE = MergeTree()
 ORDER BY (environment_id, id);
 """
 
-# Numeric JSON values may surface under any of these `JSONType` strings —
-# `Int64` and `UInt64` for integer-shaped numbers, `Double` for fractional.
-# Bool is its own branch; it gates the bool compare.
-_NUMERIC_TYPES = ("Int64", "UInt64", "Double")
-_NUMERIC_TYPES_SQL = "('" + "', '".join(_NUMERIC_TYPES) + "')"
+
+def _backtick(trait_key: str) -> str:
+    """Escape a trait key for use as a backtick-quoted JSON subcolumn name.
+    Doubles embedded backticks per CH's identifier escape rule."""
+    return "`" + trait_key.replace("`", "``") + "`"
 
 
 def _non_null(expr: str) -> str:
     """Coerce a possibly-`Nullable(String)` expression down to non-nullable
     `String`. ClickHouse rejects regex functions (`match`, `extractAll`)
-    over `Nullable(String)` because the implied result types
+    over `Nullable(String)` because the inferred result types
     `Nullable(UInt8)` / `Nullable(Array(String))` aren't representable.
-    The translator always guards regex calls with `IS NOT NULL`, so the
+    The translator always guards these calls with `IS NOT NULL`, so the
     coalesce default is unreachable at runtime."""
     return f"ifNull({expr}, '')"
 
@@ -100,6 +126,12 @@ class ClickHouseDialect:
     def identity_key_expr(self, alias: str) -> str:
         return f"{alias}.identity_key"
 
+    def _sub(self, alias: str, trait_key: str) -> str:
+        """The raw JSON subcolumn reference for a trait key.
+        ``alias.traits.`key` `` — Dynamic-typed, NULL for missing keys
+        and explicit JSON null."""
+        return f"{alias}.traits.{_backtick(trait_key)}"
+
     def trait_path(self, alias: str, trait_key: str) -> str:
         # Return the trait's canonical string form, mirroring Snowflake's
         # `i.traits:"key"::STRING`:
@@ -110,38 +142,23 @@ class ClickHouseDialect:
         #   - JSON int / float  → '42' / '3.14'
         #   - JSON true / false → 'true' / 'false'
         #
-        # For string traits we use `JSONExtractString` to strip the JSON
-        # quotes that `JSONExtractRaw` would carry through, so downstream
-        # regex / position / compare see the natural string form. For non-
-        # string types `JSONExtractRaw` already yields the bare token.
-        # `JSONType` returns the `'Null'` enum value for both missing keys
-        # and explicit JSON null values, so a single check at the top
-        # collapses both to SQL NULL — matching Snowflake's VARIANT path
-        # semantics for the translator's `IS NULL` / `IS NOT NULL` guards.
-        key_lit = string_literal(trait_key)
-        traits = f"{alias}.traits"
-        type_expr = f"JSONType({traits}, {key_lit})"
-        return (
-            f"if({type_expr} = 'Null', NULL,"
-            f" if({type_expr} = 'String',"
-            f" JSONExtractString({traits}, {key_lit}),"
-            f" JSONExtractRaw({traits}, {key_lit})))"
-        )
+        # `toString` over a JSON subcolumn does the right canonicalisation
+        # natively. The `IS NULL` guard distinguishes missing from a
+        # JSON empty string (`""` round-trips as `''` through toString,
+        # the same value `toString(NULL)` produces) — the translator's
+        # `IS NULL` / `IS NOT NULL` checks rely on this distinction.
+        sub = self._sub(alias, trait_key)
+        return f"if({sub} IS NULL, NULL, toString({sub}))"
 
     def trait_eq(self, alias: str, trait_key: str, value: object, negate: bool) -> str:
-        key_lit = string_literal(trait_key)
-        traits = f"{alias}.traits"
-        type_expr = f"JSONType({traits}, {key_lit})"
-        str_extract = f"JSONExtractString({traits}, {key_lit})"
+        sub = self._sub(alias, trait_key)
         str_value = str(value)
         str_lit = string_literal(str_value)
-        # Engine bool cast: `lambda v: v not in ("False", "false")`. A JSON
-        # `true` matches every segment value except literal "False" / "false";
-        # for those two the segment coerces to False, so it matches a JSON
-        # `false`.
-        bool_target = 0 if str_value in ("False", "false") else 1
-        bool_extract = f"JSONExtractBool({traits}, {key_lit})"
-        # Engine int/float cast: int(v) / float(v); ValueError → no match.
+        # Engine bool cast: `v not in ("False", "false")`. A JSON true matches
+        # every segment value except literal "False" / "false"; those two coerce
+        # to False and match a JSON false.
+        bool_target = "true" if str_value not in ("False", "false") else "false"
+        # Engine int / float cast: ValueError → no match for that branch.
         try:
             int_lit: str | None = str(int(str_value))
         except (ValueError, TypeError):
@@ -150,52 +167,60 @@ class ClickHouseDialect:
             float_lit: str | None = repr(float(str_value))
         except (ValueError, TypeError):
             float_lit = None
-        float_extract = f"JSONExtractFloat({traits}, {key_lit})"
+
+        str_sub = f"{sub}.:String"
+        int_sub = f"{sub}.:Int64"
+        uint_sub = f"{sub}.:UInt64"
+        float_sub = f"{sub}.:Float64"
+        bool_sub = f"{sub}.:Bool"
 
         if not negate:
-            clauses = [f"({type_expr} = 'String' AND {str_extract} = {str_lit})"]
-            clauses.append(f"({type_expr} = 'Bool' AND {bool_extract} = {bool_target})")
-            if int_lit is not None:
+            # OR-of-typed-equals. Each `.:Type` accessor returns NULL when
+            # the JSON value is the wrong type, so unrelated branches
+            # short-circuit to NULL (false in WHERE).
+            clauses = [f"({str_sub} = {str_lit})"]
+            clauses.append(f"({bool_sub} = {bool_target})")
+            num_lit = int_lit if int_lit is not None else float_lit
+            if num_lit is not None:
+                # Match across Int64 / UInt64 / Float64 — JSON numerics can
+                # surface as any of the three depending on the literal shape.
                 clauses.append(
-                    f"({type_expr} IN {_NUMERIC_TYPES_SQL} AND {float_extract} = {int_lit})"
-                )
-            elif float_lit is not None:
-                clauses.append(
-                    f"({type_expr} IN {_NUMERIC_TYPES_SQL} AND {float_extract} = {float_lit})"
+                    f"({int_sub} = {num_lit} OR {uint_sub} = {num_lit} OR {float_sub} = {num_lit})"
                 )
             return "(" + " OR ".join(clauses) + ")"
 
         # NOT_EQUAL: per-type dispatch. Engine returns True only when the
-        # cast succeeded *and* values differ. Cast-failure types fall
-        # through to FALSE; that's the OR omitting them.
+        # cast succeeded *and* values differ. `.:Type IS NOT NULL AND .:Type
+        # <> lit` encodes that directly; types where the segment value can't
+        # cast contribute FALSE.
         no_match = "FALSE"
-        bool_branch = f"{bool_extract} <> {bool_target}"
-        num_branch = (
-            f"{float_extract} <> {int_lit if int_lit is not None else float_lit}"
-            if (int_lit is not None or float_lit is not None)
-            else no_match
-        )
+        bool_branch = f"({bool_sub} IS NOT NULL AND {bool_sub} <> {bool_target})"
+        if int_lit is not None or float_lit is not None:
+            num_lit = int_lit if int_lit is not None else float_lit
+            num_branch = (
+                f"(({int_sub} IS NOT NULL AND {int_sub} <> {num_lit})"
+                f" OR ({uint_sub} IS NOT NULL AND {uint_sub} <> {num_lit})"
+                f" OR ({float_sub} IS NOT NULL AND {float_sub} <> {num_lit}))"
+            )
+        else:
+            num_branch = no_match
         return (
-            f"(({type_expr} = 'String' AND {str_extract} <> {str_lit})"
-            f" OR ({type_expr} = 'Bool' AND {bool_branch})"
-            f" OR ({type_expr} IN {_NUMERIC_TYPES_SQL} AND {num_branch}))"
+            f"(({str_sub} IS NOT NULL AND {str_sub} <> {str_lit}) OR {bool_branch} OR {num_branch})"
         )
 
     def trait_in(self, alias: str, trait_key: str, items: list[str]) -> str:
-        # Mirrors Snowflake's single-gate shape: string traits match items
-        # directly; integer traits stringify before compare. Bool / float /
-        # array traits never match per engine semantics, so they sit
-        # outside the gate.
-        key_lit = string_literal(trait_key)
-        traits = f"{alias}.traits"
-        type_expr = f"JSONType({traits}, {key_lit})"
-        str_extract = f"JSONExtractString({traits}, {key_lit})"
-        int_extract = f"JSONExtractInt({traits}, {key_lit})"
+        # String traits match items directly; integer traits stringify
+        # before compare. Bool / float / array traits never match per
+        # engine semantics, so they sit outside the gate.
+        sub = self._sub(alias, trait_key)
+        str_sub = f"{sub}.:String"
+        int_sub = f"{sub}.:Int64"
+        uint_sub = f"{sub}.:UInt64"
         item_lits = ",".join(string_literal(v) for v in items)
         return (
-            f"(({type_expr} = 'String' AND {str_extract} IN ({item_lits}))"
-            f" OR ({type_expr} IN ('Int64', 'UInt64')"
-            f" AND toString({int_extract}) IN ({item_lits})))"
+            f"(({str_sub} IS NOT NULL AND {str_sub} IN ({item_lits}))"
+            f" OR ({int_sub} IS NOT NULL AND toString({int_sub}) IN ({item_lits}))"
+            f" OR ({uint_sub} IS NOT NULL AND toString({uint_sub}) IN ({item_lits})))"
         )
 
     # ----- string operations -----
@@ -248,18 +273,25 @@ class ClickHouseDialect:
     # ----- hashing -----
 
     def md5_hex(self, expr: str) -> str:
-        # `MD5` returns a FixedString(16); `hex` formats it as uppercase.
-        # `lower` to keep parity with Snowflake's `MD5_HEX` (the downstream
-        # `parse_hex_chunk` is case-insensitive, but matching the
-        # canonical form keeps debugging output identical across dialects).
-        return f"lower(hex(MD5({expr})))"
+        # Return the raw 16-byte MD5 digest rather than the hex string.
+        # `parse_hex_chunk` below reads bytes directly via
+        # `reinterpretAsUInt32(reverse(substring(...)))`, skipping the
+        # `hex` → `unhex` round-trip — small but consistent win on
+        # PERCENTAGE_SPLIT-heavy predicates.
+        return f"MD5({expr})"
 
     def parse_hex_chunk(self, hex_expr: str, start: int, length: int = 8) -> str:
-        # `unhex` returns `length / 2` bytes; `reinterpretAsUInt32` reads
-        # them little-endian, so `reverse` first to consume the bytes in
-        # big-endian order — matching `int(hex_chunk, 16)`.
-        slice_expr = f"substring({hex_expr}, {start}, {length})"
-        return f"reinterpretAsUInt32(reverse(unhex({slice_expr})))"
+        # `hex_expr` is the raw `FixedString(16)` from `md5_hex` (not a hex
+        # string). Map the 1-indexed hex start position to a 1-indexed byte
+        # position: hex 1 → byte 1, hex 9 → byte 5, hex 17 → byte 9,
+        # hex 25 → byte 13. 8 hex chars = 4 raw bytes.
+        byte_start = (start - 1) // 2 + 1
+        byte_length = length // 2
+        slice_expr = f"substring({hex_expr}, {byte_start}, {byte_length})"
+        # `reinterpretAsUInt32` reads bytes little-endian; `reverse` first
+        # so the value equals `int(hex_chars, 16)` for the corresponding
+        # hex slice — preserves `_HASH_CONST_*` constants from the translator.
+        return f"reinterpretAsUInt32(reverse({slice_expr}))"
 
     # ----- casts -----
 

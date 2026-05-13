@@ -74,6 +74,9 @@ class ClickHouseHarness:
                 "max_query_size": 16 * 1024 * 1024,
                 "max_ast_elements": 1_000_000,
                 "max_expanded_ast_elements": 1_000_000,
+                # Required for `JSON`-column DDL on ClickHouse Cloud as of
+                # 25.12. No-op on OSS builds where the type is already GA.
+                "allow_experimental_json_type": 1,
             },
         )
         try:
@@ -89,6 +92,8 @@ class ClickHouseHarness:
         # cleanup. Caller is responsible for the DROP in the `evaluate`
         # path's finally block; the client disconnect also wipes Memory
         # tables, so a crashed test still self-cleans.
+        # `JSON` column for traits — matches the dialect's `schema_ddl`
+        # shape. Memory engine for the scratch table; no on-disk cleanup.
         session.command(
             f"""
             CREATE TABLE {table} (
@@ -96,25 +101,26 @@ class ClickHouseHarness:
                 id UInt64,
                 identifier String,
                 identity_key String,
-                traits Nullable(String)
+                traits JSON
             )
             ENGINE = Memory
             """
         )
         if rows:
-            session.insert(
-                table,
-                [
-                    (r.environment_id, r.id, r.identifier, r.identity_key, r.traits_json)
-                    for r in rows
-                ],
-                column_names=[
-                    "environment_id",
-                    "id",
-                    "identifier",
-                    "identity_key",
-                    "traits",
-                ],
+            # clickhouse-connect's bulk `insert` doesn't accept JSON strings
+            # for `JSON` columns directly — it expects Python dicts. Use a
+            # raw `INSERT ... VALUES` with `::JSON` casts on the literal so
+            # CH parses each trait map server-side.
+            values = [
+                f"('{_q(r.environment_id)}', {r.id},"
+                f" '{_q(r.identifier)}', '{_q(r.identity_key)}',"
+                + (f" '{_q(r.traits_json)}'::JSON)" if r.traits_json else " NULL)")
+                for r in rows
+            ]
+            session.command(
+                f"INSERT INTO {table}"
+                f" (environment_id, id, identifier, identity_key, traits)"
+                f" VALUES {','.join(values)}"
             )
         return table
 

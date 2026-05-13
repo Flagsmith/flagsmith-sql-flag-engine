@@ -75,17 +75,22 @@ CREATE TABLE IF NOT EXISTS IDENTITIES (
     id UInt64,
     identifier String,
     identity_key String,
-    traits Nullable(String)
+    traits JSON
 )
 ENGINE = MergeTree()
 ORDER BY (environment_id, id);
 ```
 
-The Snowflake table stores traits in a single `VARIANT` column; the
-ClickHouse table stores the JSON-encoded trait map in a `Nullable(String)`
-column read via `JSONExtract*`. Either way, trait keys are *data* — new
+Both engines store traits in a single columnar-JSON column —
+Snowflake's `VARIANT` and ClickHouse's `JSON` (24+, GA in 25.x). Each
+key is stored as a typed subcolumn, so trait reads are direct columnar
+scans rather than per-row JSON parses. Trait keys are *data* — new
 keys appear without schema changes — and the translator only sees the
 abstract path extraction.
+
+ClickHouse Cloud requires `SET allow_experimental_json_type = 1` when
+creating a `JSON`-column table (the type is GA on OSS 25.x); the
+harness and bench apply this setting automatically.
 
 Programmatic access:
 
@@ -144,13 +149,12 @@ The shape of the two implementations differs because the engines do:
 
 | Concern              | Snowflake                                | ClickHouse                                                  |
 | -------------------- | ---------------------------------------- | ----------------------------------------------------------- |
-| Trait storage        | `VARIANT` (columnar JSON)                | `Nullable(String)` JSON read via `JSONExtract*`             |
-| Trait path           | `i.traits:"key"` returns VARIANT         | `if(JSONType=Null, NULL, ...)` returning canonical string   |
-| Type discrimination  | `TYPEOF`, `IS_BOOLEAN`, `IS_DECIMAL`     | `JSONType` (Enum8) — exact type names                       |
-| Hex chunk parse      | `TO_NUMBER(SUBSTR(...), 'XXXXXXXX')`     | `reinterpretAsUInt32(reverse(unhex(substring(...))))`       |
+| Trait storage        | `VARIANT` (columnar JSON)                | `JSON` (CH 24+, columnar JSON with typed subcolumns)        |
+| Trait path           | `i.traits:"key"` returns VARIANT         | ``i.traits.`key` `` returns Dynamic                         |
+| Type discrimination  | `TYPEOF`, `IS_BOOLEAN`, `IS_DECIMAL`     | Typed-variant subcolumns ``.:String``, ``.:Int64``, ``.:Bool`` |
+| Hex chunk parse      | `TO_NUMBER(SUBSTR(...), 'XXXXXXXX')`     | `reinterpretAsUInt32(reverse(substring(MD5(...), n, 4)))`  |
 | Anchored regex       | `REGEXP_INSTR(value, pat) = 1`           | `match(value, '^(pat)')` — `match` is unanchored            |
-| Numeric coalesce     | Lossless string fast path via VARIANT::STRING | Per-type dispatch — no analogous canonical stringify   |
-| Nullable propagation | `(VARIANT NULL)::STRING → NULL`          | `Nullable(String)` is explicit; regex funcs reject it       |
+| Nullable propagation | `(VARIANT NULL)::STRING → NULL`          | Subcolumn returns Dynamic NULL; `IS NULL` short-circuits    |
 
 Practical implications for callers:
 
@@ -160,9 +164,9 @@ Practical implications for callers:
   always guarded by `IS NOT NULL` upstream, so the default is
   unreachable at runtime.
 - Snowflake's VARIANT path collapses both missing keys and JSON null to
-  SQL NULL "by accident" (cast propagation). The ClickHouse dialect
-  collapses both explicitly via `JSONType = 'Null'`. Caller-visible
-  behaviour is the same.
+  SQL NULL "by accident" (cast propagation). The ClickHouse dialect's
+  subcolumn access does the same explicitly via the leading
+  `IS NULL` guard in `trait_path`. Caller-visible behaviour is the same.
 - ClickHouse's batched `EXISTS`-equivalent uses windowed `count() > 0`
   inside a `UNION ALL` — `EXISTS (SELECT 1 FROM ...)` isn't a top-level
   expression in ClickHouse the way it is in Snowflake.
