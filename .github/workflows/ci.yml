@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    env:
+      CLICKHOUSE_HOST: localhost
+      CLICKHOUSE_PORT: "8123"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: make lint
+      - run: make typecheck
+      - name: Start ClickHouse
+        run: docker compose up --detach --wait clickhouse
+      - run: make test
+      - name: Check Coverage
+        uses: 5monkeys/cobertura-action@v14
+        with:
+          minimum_coverage: 100
+          fail_below_threshold: true
+          show_missing: true

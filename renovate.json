@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommitScopeDisabled"],
+  "ignorePresets": [":semanticPrefixFixDepsChoreOthers"],
+  "semanticCommitType": "deps",
+  "git-submodules": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "CVEs only — disable proactive bumps for everything by default.",
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "rollback",
+        "bump",
+        "replacement",
+        "lockFileMaintenance"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Aggressive bumps for the engine-test-data submodule.",
+      "matchManagers": ["git-submodules"],
+      "enabled": true
+    }
+  ]
+}
