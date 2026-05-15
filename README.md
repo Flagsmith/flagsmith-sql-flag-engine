@@ -53,7 +53,21 @@ regex flavour can't compile. Callers should fall back to
 ## Schema
 
 Each dialect publishes the table layout it expects via a `schema_ddl`
-constant. For ClickHouse:
+constant. For Snowflake:
+
+```sql
+CREATE TABLE IF NOT EXISTS IDENTITIES (
+    environment_id STRING NOT NULL,
+    id NUMBER NOT NULL,
+    identifier STRING NOT NULL,
+    identity_key STRING NOT NULL,
+    traits VARIANT,
+    PRIMARY KEY (environment_id, id)
+)
+CLUSTER BY (environment_id, id);
+```
+
+For ClickHouse:
 
 ```sql
 CREATE TABLE IF NOT EXISTS IDENTITIES (
@@ -67,11 +81,12 @@ ENGINE = MergeTree()
 ORDER BY (environment_id, id);
 ```
 
-Traits live in a single `JSON` column (CH 24+, GA in 25.x). Each key is
-stored as a typed subcolumn, so trait reads are direct columnar scans
-rather than per-row JSON parses. Trait keys are *data* — new keys appear
-without schema changes — and the translator only sees the abstract path
-extraction.
+Both engines store traits in a single columnar-JSON column —
+Snowflake's `VARIANT` and ClickHouse's `JSON` (24+, GA in 25.x). Each
+key is stored as a typed subcolumn, so trait reads are direct columnar
+scans rather than per-row JSON parses. Trait keys are *data* — new keys
+appear without schema changes — and the translator only sees the
+abstract path extraction.
 
 ClickHouse Cloud requires `SET allow_experimental_json_type = 1` when
 creating a `JSON`-column table (the type is GA on OSS 25.x); the test
@@ -80,7 +95,8 @@ harness applies this setting automatically.
 Programmatic access:
 
 ```python
-from flagsmith_sql_flag_engine.dialects.clickhouse import SCHEMA_DDL
+from flagsmith_sql_flag_engine.dialects.snowflake import SCHEMA_DDL as SNOWFLAKE_DDL
+from flagsmith_sql_flag_engine.dialects.clickhouse import SCHEMA_DDL as CLICKHOUSE_DDL
 ```
 
 ## Engine parity
@@ -95,9 +111,21 @@ To run the engine-parity suite locally:
 
 ```bash
 git submodule update --init                 # pull engine-test-data
+
+# Snowflake
+export SNOWFLAKE_ACCOUNT=...
+export SNOWFLAKE_USER=...
+export SNOWFLAKE_PRIVATE_KEY_PATH=...
+
+# ClickHouse — bring up the local container the CI workflow also uses
 docker compose up --detach --wait clickhouse
+
 uv run pytest tests/test_engine.py
 ```
+
+Each harness's environment variables are only read at session-create
+time; to run a single dialect's parity, pass e.g. `-k snowflake` or
+`-k clickhouse` and only export that dialect's credentials.
 
 Adding a new dialect's parity coverage is one harness module — see
 `tests/harnesses/` for the shape.
@@ -107,9 +135,9 @@ Adding a new dialect's parity coverage is one harness module — see
 The translator is dialect-aware: a `Dialect` protocol abstracts the
 SQL fragments that differ across SQL engines — MD5 hex, hex-to-int
 parsing, prefix-anchored regex, padded-version comparison, type-aware
-trait predicates, regex flavour. Today `ClickHouseDialect` is the only
-implementation; adding another engine such as Snowflake, DuckDB or
-Postgres means writing one class.
+trait predicates, regex flavour. Today `SnowflakeDialect` and
+`ClickHouseDialect` are implemented; adding another engine such as
+DuckDB or Postgres means writing one class.
 
 ## Operator coverage
 
