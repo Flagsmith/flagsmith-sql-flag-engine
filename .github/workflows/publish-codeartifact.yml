@@ -1,0 +1,32 @@
+name: Publish to CodeArtifact
+
+on:
+  pull_request:
+    paths: ['.github/workflows/publish-codeartifact.yml']
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::084060095745:role/codeartifact-github-actions-production
+          aws-region: eu-west-2
+      - name: Get CodeArtifact token
+        run: |
+          echo "CODEARTIFACT_TOKEN=$(aws codeartifact get-authorization-token \
+            --domain flagsmith --domain-owner 084060095745 \
+            --query authorizationToken --output text)" >> "$GITHUB_ENV"
+      - run: uv build
+      - run: |
+          uv publish \
+            --publish-url https://flagsmith-084060095745.d.codeartifact.eu-west-2.amazonaws.com/pypi/production-python/ \
+            --username aws --password "$CODEARTIFACT_TOKEN" \
+            dist/*
