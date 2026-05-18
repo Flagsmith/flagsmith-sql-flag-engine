@@ -10,6 +10,13 @@ jobs:
     name: CI
     runs-on: ubuntu-latest
     env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+      SNOWFLAKE_PRIVATE_KEY_PATH: /tmp/snowflake_pk.p8
       CLICKHOUSE_HOST: localhost
       CLICKHOUSE_PORT: "8123"
     steps:
@@ -21,6 +28,10 @@ jobs:
           enable-cache: true
       - run: make lint
       - run: make typecheck
+      - name: Write Snowflake key file
+        run: |
+          umask 077
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > /tmp/snowflake_pk.p8
       - name: Start ClickHouse
         run: docker compose up --detach --wait clickhouse
       - run: make test
