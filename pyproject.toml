@@ -1,0 +1,75 @@
+[project]
+name = "flagsmith-sql-flag-engine"
+version = "0.1.0a2"
+description = "SQL translator for Flagsmith segment predicates."
+readme = "README.md"
+authors = [{ name = "Flagsmith", email = "engineering@flagsmith.com" }]
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: SQL",
+    "Topic :: Database",
+]
+dependencies = ["flagsmith-flag-engine>=10", "jsonpath-rfc9535>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/Flagsmith/flagsmith-sql-flag-engine"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3",
+    "mypy>=1.10",
+    "prek>=0.3",
+    "clickhouse-connect>=0.7",
+    "json5>=0.14.0",
+    "pytest-cov>=7.1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.14,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = [
+    "-ra",
+    "--cov",
+    "src",
+    "--cov-report",
+    "term-missing",
+    "--cov-report",
+    "xml",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+
+[tool.coverage.report]
+# `match` statements exhaustive over a Literal type record a phantom
+# fall-through branch from the last case to function exit; coverage.py
+# can't see the type-system exhaustiveness mypy enforces. Treat any
+# `case` line as a possibly-partial branch so the gate stays at 100%
+# without us littering the source with `# pragma: no branch`.
+partial_branches = [
+    "pragma: no branch",
+    "case .+:",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+files = ["src/flagsmith_sql_flag_engine", "tests"]
+
+[[tool.mypy.overrides]]
+module = "clickhouse_connect.*"
+ignore_missing_imports = true

@@ -1,0 +1,19 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.5.6
+    environment:
+      # Skip the random-password bootstrap. The container is only ever
+      # reachable from the harness on the same compose network / host
+      # loopback, so the default `default` user with no password is fine.
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ports:
+      - "8123:8123"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
