@@ -1,0 +1,56 @@
+name: Publish Pypi Package
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build distribution
+    permissions:
+      contents: write
+
+    steps:
+      - name: Cloning repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build binary wheel and a source tarball
+        run: make build
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Upload dist to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}"
+
+  publish:
+    runs-on: ubuntu-latest
+    name: Publish to PyPI
+    needs: build
+    environment: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish Package to Pypi
+        uses: pypa/gh-action-pypi-publish@release/v1

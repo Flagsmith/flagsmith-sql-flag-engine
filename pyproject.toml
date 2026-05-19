@@ -1,6 +1,6 @@
 [project]
 name = "flagsmith-sql-flag-engine"
-version = "0.1.0a2"
+version = "0.1.0"
 description = "SQL translator for Flagsmith segment predicates."
 readme = "README.md"
 authors = [{ name = "Flagsmith", email = "engineering@flagsmith.com" }]
