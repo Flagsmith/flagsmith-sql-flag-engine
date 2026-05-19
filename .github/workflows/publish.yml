@@ -9,8 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     name: Build distribution
-    permissions:
-      contents: write
 
     steps:
       - name: Cloning repo
@@ -32,11 +30,6 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Upload dist to GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}"
-
   publish:
     runs-on: ubuntu-latest
     name: Publish to PyPI
@@ -44,6 +37,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
+      contents: write
 
     steps:
       - name: Download distribution artifacts
@@ -54,3 +48,8 @@ jobs:
 
       - name: Publish Package to Pypi
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Upload dist to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}"
