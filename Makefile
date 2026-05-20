@@ -21,6 +21,10 @@ test: ## Run unit tests. Override scope with opts, e.g. `make test opts='-m engi
 typecheck: ## Run mypy
 	uv run mypy
 
+.PHONY: build
+build: ## Build the sdist and wheel into dist/
+	uv build
+
 .PHONY: help
 help:
 	@echo "Usage: make [target]"
