@@ -282,6 +282,96 @@ def test_translate_segment__empty_rules__returns_false() -> None:
     assert translate_segment(seg, _ctx()) == "FALSE"
 
 
+def test_translate_segment__rule_with_no_conditions_or_nested_rules__matches_all() -> None:
+    # Given
+    seg: SegmentContext = {
+        "key": "10",
+        "name": "s",
+        "rules": [{"type": "ALL", "conditions": [], "rules": []}],
+    }
+
+    # When / Then
+    assert translate_segment(seg, _ctx()) == "(TRUE)"
+
+
+def test_translate_segment__rule_with_conditions_and_nested_rule__ands_the_two_groups() -> None:
+    # Given a rule carrying both a condition and a (translatable) nested rule
+    seg: SegmentContext = {
+        "key": "11",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [{"operator": "EQUAL", "property": "plan", "value": "growth"}],
+                "rules": [
+                    {
+                        "type": "ALL",
+                        "conditions": [{"operator": "EQUAL", "property": "country", "value": "GB"}],
+                    }
+                ],
+            }
+        ],
+    }
+
+    # When translated
+    sql = translate_segment(seg, _ctx())
+
+    # Then the condition group and the nested-rule group are AND-ed together
+    # (mirroring the engine: matches_conditions AND matches_rules)
+    assert sql == (
+        "(((("
+        "if(i.traits.`plan` IS NULL, NULL, toString(i.traits.`plan`)) IS NOT NULL"
+        " AND ((toString(i.traits.`plan`) = 'growth') OR (i.traits.`plan`.:Bool = true))"
+        "))) AND (((("
+        "if(i.traits.`country` IS NULL, NULL, toString(i.traits.`country`)) IS NOT NULL"
+        " AND ((toString(i.traits.`country`) = 'GB') OR (i.traits.`country`.:Bool = true))"
+        ")))))"
+    )
+
+
+def test_translate_segment__any_rule_with_conditions_and_nested_rule__ors_within_ands_across() -> (
+    None
+):
+    # Given an ANY rule with two conditions and a nested rule
+    seg: SegmentContext = {
+        "key": "12",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ANY",
+                "conditions": [
+                    {"operator": "EQUAL", "property": "plan", "value": "growth"},
+                    {"operator": "EQUAL", "property": "plan", "value": "scale"},
+                ],
+                "rules": [
+                    {
+                        "type": "ALL",
+                        "conditions": [{"operator": "EQUAL", "property": "country", "value": "GB"}],
+                    }
+                ],
+            }
+        ],
+    }
+
+    # When
+    sql = translate_segment(seg, _ctx())
+
+    # Then
+    # interpreted as `any(conditions) AND any(rules)`
+    assert sql == (
+        "(((("
+        "if(i.traits.`plan` IS NULL, NULL, toString(i.traits.`plan`)) IS NOT NULL"
+        " AND ((toString(i.traits.`plan`) = 'growth') OR (i.traits.`plan`.:Bool = true))"
+        ")) OR (("
+        "if(i.traits.`plan` IS NULL, NULL, toString(i.traits.`plan`)) IS NOT NULL"
+        " AND ((toString(i.traits.`plan`) = 'scale') OR (i.traits.`plan`.:Bool = true))"
+        "))) AND (((("
+        "if(i.traits.`country` IS NULL, NULL, toString(i.traits.`country`)) IS NOT NULL"
+        " AND ((toString(i.traits.`country`) = 'GB') OR (i.traits.`country`.:Bool = true))"
+        ")))))"
+    )
+
+
 def test_translate_segment__trait_key_with_hyphens__quotes_subcolumn_path() -> None:
     # Given a trait key with a hyphen (illegal as an unquoted SQL identifier)
     seg: SegmentContext = {
