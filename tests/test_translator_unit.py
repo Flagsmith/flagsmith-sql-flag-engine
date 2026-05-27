@@ -282,6 +282,18 @@ def test_translate_segment__empty_rules__returns_false() -> None:
     assert translate_segment(seg, _ctx()) == "FALSE"
 
 
+def test_translate_segment__rule_with_no_conditions_or_nested_rules__matches_all() -> None:
+    # Given
+    seg: SegmentContext = {
+        "key": "10",
+        "name": "s",
+        "rules": [{"type": "ALL", "conditions": [], "rules": []}],
+    }
+
+    # When / Then
+    assert translate_segment(seg, _ctx()) == "(TRUE)"
+
+
 def test_translate_segment__trait_key_with_hyphens__quotes_subcolumn_path() -> None:
     # Given a trait key with a hyphen (illegal as an unquoted SQL identifier)
     seg: SegmentContext = {

@@ -517,26 +517,33 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
 
 
 def translate_rule(rule: SegmentRule, ctx: TranslateContext) -> str | None:
-    children: list[str] = []
+    cond_children: list[str] = []
     for cond in rule.get("conditions") or []:
         sql = translate_condition(cond, ctx)
         if sql is None:
             return None
-        children.append(f"({sql})")
+        cond_children.append(f"({sql})")
+    rule_children: list[str] = []
     for nested in rule.get("rules") or []:
         sql = translate_rule(nested, ctx)
         if sql is None:
             return None
-        children.append(f"({sql})")
+        rule_children.append(f"({sql})")
 
-    assert children, "segment rule must have at least one condition or nested rule"
-    match rule["type"]:
-        case "ALL":
-            return " AND ".join(children)
-        case "ANY":
-            return " OR ".join(children)
-        case "NONE":
-            return f"NOT ({' OR '.join(children)})"
+    # Mirror the engine's `context_matches_rule`: conditions and nested rules
+    # are two independent groups AND-ed together, each vacuously true when
+    # empty.
+    op = {"ALL": " AND ", "ANY": " OR ", "NONE": " OR "}[rule["type"]]
+    groups = [
+        f"NOT ({op.join(c)})" if rule["type"] == "NONE" else op.join(c)
+        for c in (cond_children, rule_children)
+        if c
+    ]
+    if not groups:
+        return "TRUE"
+    if len(groups) == 1:
+        return groups[0]
+    return " AND ".join(f"({g})" for g in groups)
 
 
 def translate_segment(segment: SegmentContext, ctx: TranslateContext) -> str | None:
