@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.0...v0.1.1) (2026-05-27)
+
+
+### Bug Fixes
+
+* Segment rule with no conditions or nested rules crashes translation ([#14](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/14)) ([f909d67](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/f909d67e1e20be825dad3921bcaad3c9c100f69f))
+
 ## 0.1.0 (2026-05-20)
 
 
