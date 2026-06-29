@@ -435,10 +435,9 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         identity: dict[str, object] = ctx.evaluation_context.get("identity") or {}  # type: ignore[assignment]
         kind = classification.kind
         if not prop:
-            # Implicit `$.identity.key`. The key is always present in the store,
-            # so the split is translatable whether or not the evaluation context
-            # carries an identity. This intentionally diverges from the engine's
-            # "no identity → False" verdict.
+            # In tranditional engine implementations, this branch implies
+            # an identity-less context, which makes no sense for the SQL engine.
+            # Assume identity key.
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
         elif kind == "key":
             value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.key"))
