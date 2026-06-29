@@ -63,11 +63,12 @@ typical Flagsmith trait vocabularies; we should monitor.
     we `nullIf(..., '')` to keep the engine's "no n-th run" → NULL
     contract.
 
-  - Hex-chunk parsing reads directly from the raw 16-byte MD5 output
-    rather than round-tripping through hex. `MD5(expr)` returns a
-    `FixedString(16)`; `reinterpretAsUInt32(reverse(substring(...)))`
-    pulls a big-endian UInt32 out of any 4-byte slice. Skipping the
-    `hex(MD5(...))` → `unhex(substring(...))` round-trip is a small but
+  - PERCENTAGE_SPLIT reinterprets the raw 16-byte `MD5` digest directly
+    into a native `UInt128` and takes `% 9999`, rather than parsing hex
+    chunks and recombining them with modular arithmetic. `MD5(expr)`
+    returns a big-endian `FixedString(16)`; `reinterpretAsUInt128` reads
+    little-endian, so `reverse` first to make the value equal
+    `int(md5_hex, 16)`. One hash, one reinterpret, one modulo — a
     consistent speedup on `% Split`-heavy predicates.
 
 ## Setup
@@ -287,26 +288,18 @@ class ClickHouseDialect:
 
     # ----- hashing -----
 
-    def md5_hex(self, expr: str) -> str:
-        # Return the raw 16-byte MD5 digest rather than the hex string.
-        # `parse_hex_chunk` below reads bytes directly via
-        # `reinterpretAsUInt32(reverse(substring(...)))`, skipping the
-        # `hex` → `unhex` round-trip — small but consistent win on
-        # PERCENTAGE_SPLIT-heavy predicates.
-        return f"MD5({expr})"
-
-    def parse_hex_chunk(self, hex_expr: str, start: int, length: int = 8) -> str:
-        # `hex_expr` is the raw `FixedString(16)` from `md5_hex` (not a hex
-        # string). Map the 1-indexed hex start position to a 1-indexed byte
-        # position: hex 1 → byte 1, hex 9 → byte 5, hex 17 → byte 9,
-        # hex 25 → byte 13. 8 hex chars = 4 raw bytes.
-        byte_start = (start - 1) // 2 + 1
-        byte_length = length // 2
-        slice_expr = f"substring({hex_expr}, {byte_start}, {byte_length})"
-        # `reinterpretAsUInt32` reads bytes little-endian; `reverse` first
-        # so the value equals `int(hex_chars, 16)` for the corresponding
-        # hex slice — preserves `_HASH_CONST_*` constants from the translator.
-        return f"reinterpretAsUInt32(reverse({slice_expr}))"
+    def hashed_percentage_mod_9999(self, subject_sql: str) -> str:
+        # The engine computes `int(md5_hex, 16) % 9999`. ClickHouse has a
+        # native 128-bit integer type, so reinterpret the raw 16-byte `MD5`
+        # digest straight into a `UInt128` and take the modulo — one hash,
+        # one reinterpret, one modulo. This avoids both the `hex`/`unhex`
+        # round-trip and the four-chunk modular-arithmetic recombination the
+        # 64-bit fallback needs.
+        #
+        # `MD5(...)` returns a big-endian `FixedString(16)`;
+        # `reinterpretAsUInt128` reads little-endian, so `reverse` the bytes
+        # first to make the integer equal `int(md5_hex, 16)`.
+        return f"modulo(reinterpretAsUInt128(reverse(MD5({subject_sql}))), 9999)"
 
     # ----- casts -----
 

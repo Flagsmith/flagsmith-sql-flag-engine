@@ -50,15 +50,6 @@ TRANSLATABLE_OPERATORS: frozenset[ConditionOperator] = frozenset(
 )
 
 
-# Constants for chunked MD5-mod-9999 hash. The engine computes
-# `int(md5_hex, 16) % 9999`; we split the 32-hex digest into four 8-hex
-# chunks, parse each as a 32-bit int, and combine via modular arithmetic.
-# Constants are (16^24, 16^16, 16^8) mod 9999, precomputed.
-_HASH_CONST_HIGH = 7291  # 16^24 mod 9999
-_HASH_CONST_MID = 1897  # 16^16 mod 9999
-_HASH_CONST_LOW = 6835  # 16^8 mod 9999
-
-
 # ---------------------------------------------------------------------------
 # Context: shape information the translator needs to produce correct refs.
 # ---------------------------------------------------------------------------
@@ -125,25 +116,27 @@ class TranslateContext:
 def _percentage_split_expr(
     ctx: TranslateContext, seg_key: str, ctx_value_sql: str, threshold: float
 ) -> str:
-    """Boolean SQL fragment: hash(seg_key + "," + value) <= threshold.
+    """Boolean SQL fragment: identity falls in the bottom `threshold`% of the
+    hash space for `seg_key`.
 
-    Mirrors `flag_engine.utils.hashing.get_hashed_percentage_for_object_ids`
-    via four 8-hex-char chunks combined modulo 9999. Diverges from the
-    engine on the ~1/9999 inputs where the bare hash mod 9999 == 9998 —
-    the engine recurses with doubled input; we don't.
+    Mirrors `flag_engine.utils.hashing.get_hashed_percentage_for_object_ids`:
+    the engine takes `int(md5(seg_key + "," + value), 16) % 9999`, scales it
+    to a percentage via `/ 9998 * 100`, and tests `<= threshold`. The scaling
+    is monotonic and the threshold is a translate-time constant, so we invert
+    it once here — the emitted predicate is a single integer comparison of the
+    raw modulo against a precomputed cutoff, with no per-row float divide and
+    multiply. The cutoff transform is exact across every (threshold, modulo)
+    pair, so this introduces no divergence beyond the one below.
+
+    Diverges from the engine on the ~1/9999 inputs where the bare hash
+    mod 9999 == 9998 — the engine recurses with doubled input; we don't.
     """
     d = ctx.dialect
     seg_lit = string_literal(seg_key)
     hash_subject = f"{seg_lit} || ',' || ({ctx_value_sql})"
-    h = d.md5_hex(hash_subject)
-    s1 = d.parse_hex_chunk(h, 1)
-    s2 = d.parse_hex_chunk(h, 9)
-    s3 = d.parse_hex_chunk(h, 17)
-    s4 = d.parse_hex_chunk(h, 25)
-    weighted = (
-        f"{s1} * {_HASH_CONST_HIGH} + {s2} * {_HASH_CONST_MID} + {s3} * {_HASH_CONST_LOW} + {s4}"
-    )
-    return f"({d.mod(weighted, '9999')} / 9998.0 * 100.0 <= {float(threshold)})"
+    hashed_mod = d.hashed_percentage_mod_9999(hash_subject)
+    cutoff = threshold / 100.0 * 9998.0
+    return f"({hashed_mod} <= {cutoff})"
 
 
 def _semver_sort_key_expr(ctx: TranslateContext, value_sql: str) -> str:

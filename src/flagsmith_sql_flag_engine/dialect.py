@@ -92,15 +92,22 @@ class Dialect(Protocol):
         if there are fewer than n digit runs. Used for semver."""
         ...
 
-    # --- hashing primitives for PERCENTAGE_SPLIT ---
+    # --- hashing primitive for PERCENTAGE_SPLIT ---
 
-    def md5_hex(self, expr: str) -> str:
-        """SQL fragment producing the lowercase 32-char hex MD5 digest."""
-        ...
+    def hashed_percentage_mod_9999(self, subject_sql: str) -> str:
+        """SQL fragment for `int(md5(subject), 16) % 9999` — the engine's
+        `get_hashed_percentage_for_object_ids` modulo, before scaling.
 
-    def parse_hex_chunk(self, hex_expr: str, start: int, length: int = 8) -> str:
-        """Parse `length` hex characters of `hex_expr` starting at 1-indexed
-        `start` into a non-negative integer."""
+        `subject_sql` is the already-composed hash subject (the salted,
+        comma-joined string). The translator handles the threshold compare;
+        the dialect only computes the integer modulo of the 128-bit digest.
+
+        Engines with native 128-bit integers (ClickHouse, Snowflake) can
+        reinterpret the raw 16-byte digest into one int and take the modulo
+        directly. Engines capped at 64-bit ints can recover the same value
+        without bignum support by splitting the 32-hex digest into four
+        8-hex chunks and recombining modulo 9999 with the precomputed weights
+        (16^24, 16^16, 16^8, 1) mod 9999 = (7291, 1897, 6835, 1)."""
         ...
 
     # --- type casts ---

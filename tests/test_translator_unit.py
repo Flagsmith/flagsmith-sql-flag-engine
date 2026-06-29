@@ -133,11 +133,12 @@ def test_translate_segment__percentage_split_no_property__inlines_md5_arithmetic
     # When translated
     sql = translate_segment(seg, _ctx())
 
-    # Then the SQL contains inline MD5/hex-chunk arithmetic and the threshold literal
+    # Then the SQL hashes via a native UInt128 modulo and compares the raw
+    # modulo against the precomputed cutoff (threshold 50% → 50/100 * 9998)
     assert sql is not None
     assert "MD5(" in sql
-    assert "reinterpretAsUInt32" in sql
-    assert "<= 50.0" in sql
+    assert "reinterpretAsUInt128" in sql
+    assert "<= 4999.0" in sql
 
 
 def test_translate_segment__percentage_split_on_trait__uses_trait_subcolumn() -> None:
