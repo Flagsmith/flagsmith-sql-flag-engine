@@ -39,11 +39,8 @@ _XFAIL_CASE_NAMES: set[str] = {
     # condition, so we accept the divergence on this niche shape
     # (`$.`-prefixed trait names) and let callers fall back to the engine.
     "test_jsonpath_like_trait__existing_jsonpath__should_match_trait",
-    # Engine returns False for a PERCENTAGE_SPLIT when the eval context has
-    # no identity key. The SQL engine intentionally diverges: it runs over
-    # IDENTITIES rows where the identity key always exists, so it hashes the
-    # row's key rather than folding to FALSE — the behaviour row-oriented
-    # callers (segment-membership counts/members) need.
+    # Does not apply to SQL engine implementation; we always have access to
+    # identity key.
     "test_percentage_split__no_identity_key__should_match",
 }
 
