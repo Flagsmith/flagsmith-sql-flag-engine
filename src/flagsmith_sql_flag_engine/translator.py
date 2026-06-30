@@ -435,7 +435,7 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         identity: dict[str, object] = ctx.evaluation_context.get("identity") or {}  # type: ignore[assignment]
         kind = classification.kind
         if not prop:
-            # In tranditional engine implementations, this branch implies
+            # In traditional engine implementations, this branch implies
             # an identity-less context, which makes no sense for the SQL engine.
             # Assume identity key.
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
