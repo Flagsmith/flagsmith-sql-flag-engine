@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.1...v0.1.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* **translator:** % Split without explicitly provided identity context translate to `FALSE` ([#16](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/16)) ([78cbd1a](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/78cbd1a36cc28f8e4c1bdf0b136112c6a257c489))
+
 ## [0.1.1](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.0...v0.1.1) (2026-05-27)
 
 
