@@ -435,19 +435,13 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
         identity: dict[str, object] = ctx.evaluation_context.get("identity") or {}  # type: ignore[assignment]
         kind = classification.kind
         if not prop:
-            # Implicit `$.identity.key` — engine returns False when no
-            # identity, or when the identity lacks `key`. The engine
-            # never synthesises one from env+identifier.
-            if not identity.get("key"):
-                return "FALSE"
+            # In traditional engine implementations, this branch implies
+            # an identity-less context, which makes no sense for the SQL engine.
+            # Assume identity key.
             value_expr = ctx.dialect.cast_string(ctx.identity_key_expr)
         elif kind == "key":
-            if not identity.get("key"):
-                return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.key"))
         elif kind == "identifier":
-            if not identity.get("identifier"):
-                return "FALSE"
             value_expr = ctx.dialect.cast_string(ctx.jsonpath_expr("$.identity.identifier"))
         elif kind == "identity_object":
             # PERCENTAGE_SPLIT on `$.identity` — the whole dict. Engine

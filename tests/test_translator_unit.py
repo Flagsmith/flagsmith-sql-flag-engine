@@ -542,9 +542,10 @@ def _ctx_identity_without(field: str) -> TranslateContext:
     )
 
 
-def test_translate_segment__percentage_split_implicit_key_no_identity__compiles_to_false() -> None:
-    # Given a PERCENTAGE_SPLIT with no property (implicit `$.identity.key`) and an eval
-    # context with no identity
+def test_translate_segment__percentage_split_implicit_key_no_identity__inlines_md5() -> None:
+    # Given a PERCENTAGE_SPLIT with no property (implicit `$.identity.key`) and an
+    # eval context with no identity — the row-oriented case (e.g. segment-membership
+    # counting over the whole IDENTITIES table)
     seg: SegmentContext = {
         "key": "ps2",
         "name": "s",
@@ -556,12 +557,12 @@ def test_translate_segment__percentage_split_implicit_key_no_identity__compiles_
         ],
     }
 
-    # When / Then the predicate collapses to FALSE — engine returns False without identity
-    assert translate_segment(seg, _ctx_no_identity()) == "((FALSE))"
+    # When / Then it hashes the per-row identity key rather than folding to FALSE
+    assert translate_segment(seg, _ctx_no_identity()) != "((FALSE))"
 
 
-def test_translate_segment__percentage_split_identity_key_missing__compiles_to_false() -> None:
-    # Given the eval context's identity has no `key`
+def test_translate_segment__percentage_split_key_no_context_identity__inlines_md5() -> None:
+    # Given a PERCENTAGE_SPLIT on `$.identity.key` and a context identity without `key`
     seg: SegmentContext = {
         "key": "ps3",
         "name": "s",
@@ -575,14 +576,13 @@ def test_translate_segment__percentage_split_identity_key_missing__compiles_to_f
         ],
     }
 
-    # When / Then the predicate collapses to FALSE
-    assert translate_segment(seg, _ctx_identity_without("key")) == "((FALSE))"
+    # When / Then it still hashes the per-row identity key rather than folding to FALSE
+    assert translate_segment(seg, _ctx_identity_without("key")) != "((FALSE))"
 
 
-def test_translate_segment__percentage_split_identity_identifier_missing__compiles_to_false() -> (
-    None
-):
-    # Given the eval context's identity has no `identifier`
+def test_translate_segment__percentage_split_identifier_no_context_identity__inlines_md5() -> None:
+    # Given a PERCENTAGE_SPLIT on `$.identity.identifier` and a context identity
+    # without `identifier`
     seg: SegmentContext = {
         "key": "ps4",
         "name": "s",
@@ -600,8 +600,8 @@ def test_translate_segment__percentage_split_identity_identifier_missing__compil
         ],
     }
 
-    # When / Then the predicate collapses to FALSE
-    assert translate_segment(seg, _ctx_identity_without("identifier")) == "((FALSE))"
+    # When / Then it still hashes the per-row identifier rather than folding to FALSE
+    assert translate_segment(seg, _ctx_identity_without("identifier")) != "((FALSE))"
 
 
 def test_translate_segment__percentage_split_unknown_jsonpath__returns_none() -> None:

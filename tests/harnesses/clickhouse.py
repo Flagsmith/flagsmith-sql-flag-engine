@@ -39,6 +39,9 @@ _XFAIL_CASE_NAMES: set[str] = {
     # condition, so we accept the divergence on this niche shape
     # (`$.`-prefixed trait names) and let callers fall back to the engine.
     "test_jsonpath_like_trait__existing_jsonpath__should_match_trait",
+    # Does not apply to SQL engine implementation; we always have access to
+    # identity key.
+    "test_percentage_split__no_identity_key__should_match",
 }
 
 
