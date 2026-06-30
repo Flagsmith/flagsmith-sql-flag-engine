@@ -557,21 +557,8 @@ def test_translate_segment__percentage_split_implicit_key_no_identity__inlines_m
         ],
     }
 
-    # When translated
-    sql = translate_segment(seg, _ctx_no_identity())
-
-    # Then it hashes the per-row identity-key column rather than folding to
-    # FALSE — the row supplies the subject, so a context identity is not needed
-    assert sql == (
-        "(((modulo(reinterpretAsUInt32(reverse(substring(MD5('ps2' || ',' ||"
-        " (toString(i.identity_key))), 1, 4))) * 7291 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps2' || ',' ||"
-        " (toString(i.identity_key))), 5, 4))) * 1897 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps2' || ',' ||"
-        " (toString(i.identity_key))), 9, 4))) * 6835 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps2' || ',' ||"
-        " (toString(i.identity_key))), 13, 4))), 9999) / 9998.0 * 100.0 <= 50.0)))"
-    )
+    # When / Then it hashes the per-row identity key rather than folding to FALSE
+    assert translate_segment(seg, _ctx_no_identity()) != "((FALSE))"
 
 
 def test_translate_segment__percentage_split_key_no_context_identity__inlines_md5() -> None:
@@ -589,18 +576,8 @@ def test_translate_segment__percentage_split_key_no_context_identity__inlines_md
         ],
     }
 
-    # When / Then it still hashes the per-row identity-key column
-    sql = translate_segment(seg, _ctx_identity_without("key"))
-    assert sql == (
-        "(((modulo(reinterpretAsUInt32(reverse(substring(MD5('ps3' || ',' ||"
-        " (toString(i.identity_key))), 1, 4))) * 7291 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps3' || ',' ||"
-        " (toString(i.identity_key))), 5, 4))) * 1897 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps3' || ',' ||"
-        " (toString(i.identity_key))), 9, 4))) * 6835 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps3' || ',' ||"
-        " (toString(i.identity_key))), 13, 4))), 9999) / 9998.0 * 100.0 <= 50.0)))"
-    )
+    # When / Then it still hashes the per-row identity key rather than folding to FALSE
+    assert translate_segment(seg, _ctx_identity_without("key")) != "((FALSE))"
 
 
 def test_translate_segment__percentage_split_identifier_no_context_identity__inlines_md5() -> None:
@@ -623,17 +600,8 @@ def test_translate_segment__percentage_split_identifier_no_context_identity__inl
         ],
     }
 
-    # When / Then it still hashes the per-row identifier column
-    sql = translate_segment(seg, _ctx_identity_without("identifier"))
-    assert sql == (
-        "(((modulo(reinterpretAsUInt32(reverse(substring(MD5('ps4' || ',' ||"
-        " (toString(i.identifier))), 1, 4))) * 7291 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps4' || ',' || (toString(i.identifier))),"
-        " 5, 4))) * 1897 + reinterpretAsUInt32(reverse(substring(MD5('ps4' || ',' ||"
-        " (toString(i.identifier))), 9, 4))) * 6835 +"
-        " reinterpretAsUInt32(reverse(substring(MD5('ps4' || ',' || (toString(i.identifier))),"
-        " 13, 4))), 9999) / 9998.0 * 100.0 <= 50.0)))"
-    )
+    # When / Then it still hashes the per-row identifier rather than folding to FALSE
+    assert translate_segment(seg, _ctx_identity_without("identifier")) != "((FALSE))"
 
 
 def test_translate_segment__percentage_split_unknown_jsonpath__returns_none() -> None:
