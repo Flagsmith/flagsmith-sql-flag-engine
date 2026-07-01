@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.2...v0.1.3) (2026-07-01)
+
+
+### Bug Fixes
+
+* **translator:** % Split over a trait folds to FALSE without an identity context ([#18](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/18)) ([31a4958](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/31a4958810f9f0d4d33e5cdfb6dcc848e2208314))
+
 ## [0.1.2](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.1...v0.1.2) (2026-06-30)
 
 
