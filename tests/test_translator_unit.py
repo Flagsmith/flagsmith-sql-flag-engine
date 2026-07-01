@@ -16,13 +16,6 @@ from flagsmith_sql_flag_engine.dialects.clickhouse import ClickHouseDialect
 def _ctx(env_key: str = "test-env-key", env_name: str = "Test") -> TranslateContext:
     eval_ctx: EvaluationContext = {
         "environment": {"key": env_key, "name": env_name},
-        # PERCENTAGE_SPLIT short-circuits to FALSE when the prop isn't in
-        # the eval context's traits, so seed the traits referenced below.
-        "identity": {
-            "identifier": "u",
-            "key": "k",
-            "traits": {"plan": "growth", "country": "GB", "uuid_attr": "abc"},
-        },
     }
     return TranslateContext(evaluation_context=eval_ctx, dialect=ClickHouseDialect())
 
@@ -162,6 +155,31 @@ def test_translate_segment__percentage_split_on_trait__uses_trait_subcolumn() ->
     assert sql is not None
     assert "i.traits.`uuid_attr`" in sql
     assert "MD5(" in sql
+
+
+def test_translate_segment__percentage_split_on_trait__guards_missing_trait_per_row() -> None:
+    # Given
+    seg: SegmentContext = {
+        "key": "101",
+        "name": "s",
+        "rules": [
+            {
+                "type": "ALL",
+                "conditions": [{"operator": "PERCENTAGE_SPLIT", "property": "plan", "value": "10"}],
+            }
+        ],
+    }
+
+    # When
+    sql = translate_segment(seg, _ctx())
+
+    # Then
+    assert sql is not None
+    assert "FALSE" not in sql
+    assert "i.traits.`plan`" in sql
+    assert "IS NOT NULL" in sql
+    assert "MD5(" in sql
+    assert "<= 10.0" in sql
 
 
 def test_translate_segment__jsonpath_identity_identifier__uses_column_directly() -> None:
@@ -621,25 +639,6 @@ def test_translate_segment__percentage_split_unknown_jsonpath__returns_none() ->
 
     # When / Then the translator declines (no value to hash)
     assert translate_segment(seg, _ctx()) is None
-
-
-def test_translate_segment__percentage_split_trait_not_in_context__compiles_to_false() -> None:
-    # Given a PERCENTAGE_SPLIT on a trait the eval context's identity doesn't carry
-    seg: SegmentContext = {
-        "key": "ps6",
-        "name": "s",
-        "rules": [
-            {
-                "type": "ALL",
-                "conditions": [
-                    {"operator": "PERCENTAGE_SPLIT", "property": "missing_trait", "value": "50"}
-                ],
-            }
-        ],
-    }
-
-    # When / Then the predicate collapses to FALSE
-    assert translate_segment(seg, _ctx()) == "((FALSE))"
 
 
 def test_translate_segment__is_set_on_identity_identifier__emits_true() -> None:

@@ -432,7 +432,6 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             # Engine: float() on the threshold raises → returns False.
             return "FALSE"
         threshold = float(threshold_lit)
-        identity: dict[str, object] = ctx.evaluation_context.get("identity") or {}  # type: ignore[assignment]
         kind = classification.kind
         if not prop:
             # In traditional engine implementations, this branch implies
@@ -457,13 +456,18 @@ def translate_condition(cond: SegmentCondition, ctx: TranslateContext) -> str | 
             # future work and let the caller fall back to the engine.
             return None
         else:
-            # Plain trait key, or `$.identity.traits.<X>` rewritten to
-            # the bare key. Hash subject pulls from `i.traits:"<key>"`
-            # per row.
-            traits = identity.get("traits") or {}
-            if not isinstance(traits, dict) or prop not in traits:
-                return "FALSE"
-            value_expr = ctx.dialect.cast_string(ctx.trait_path(prop))
+            # Plain trait key, or `$.identity.traits.<X>` rewritten to the
+            # bare key. Hash the per-row trait value from `i.traits:"<key>"`.
+            # A row missing the trait has no value to bucket, so it cannot
+            # match — mirroring the engine's `context_value is None -> False`.
+            trait_sql = ctx.trait_path(prop)
+            split = _percentage_split_expr(
+                ctx,
+                ctx.segment_key,
+                ctx.dialect.cast_string(trait_sql),
+                threshold,
+            )
+            return f"({trait_sql} IS NOT NULL AND {split})"
         return _percentage_split_expr(ctx, ctx.segment_key, value_expr, threshold)
 
     if not prop:
