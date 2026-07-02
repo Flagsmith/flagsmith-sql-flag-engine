@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.3...v0.2.0) (2026-07-02)
+
+
+### Features
+
+* Bind segment values as query parameters ([#20](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/20)) ([dc5ae0d](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/dc5ae0d3c291ab3fbed16dd433ea9e142812cf54))
+
 ## [0.1.3](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.2...v0.1.3) (2026-07-01)
 
 
