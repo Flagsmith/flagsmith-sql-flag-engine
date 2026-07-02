@@ -22,12 +22,12 @@ from flag_engine.context.types import (
 from flag_engine.segments.evaluator import is_context_in_segment
 from flag_engine.segments.types import ConditionOperator
 
+from flagsmith_sql_flag_engine.binder import Binder
 from flagsmith_sql_flag_engine.dialect import Dialect
 from flagsmith_sql_flag_engine.utils import (
-    escape_string,
+    bind_or_inline,
     modulo_literal,
     numeric_literal,
-    string_literal,
 )
 
 TRANSLATABLE_OPERATORS: frozenset[ConditionOperator] = frozenset(
@@ -75,7 +75,10 @@ class TranslateContext:
     being configured here. `identities_alias` is the table alias for
     `IDENTITIES` in the surrounding query — defaults to `i`.
     `segment_key` salts `PERCENTAGE_SPLIT` and is auto-injected from
-    the segment's `key` field by `translate_segment`.
+    the segment's `key` field by `translate_segment`. `binder`, when
+    provided, promotes value-bearing literals to bound query parameters
+    instead of inlining them — see `flagsmith_sql_flag_engine.binder`;
+    the default `None` inlines them as escaped SQL string literals.
     """
 
     def __init__(
@@ -84,11 +87,13 @@ class TranslateContext:
         dialect: Dialect,
         identities_alias: str = "i",
         segment_key: str | None = None,
+        binder: Binder | None = None,
     ) -> None:
         self.evaluation_context = evaluation_context
         self.dialect = dialect
         self.identities_alias = identities_alias
         self.segment_key = segment_key
+        self.binder = binder
 
     @property
     def identity_key_expr(self) -> str:
@@ -114,6 +119,7 @@ class TranslateContext:
             dialect=self.dialect,
             identities_alias=self.identities_alias,
             segment_key=key,
+            binder=self.binder,
         )
 
 
@@ -133,7 +139,7 @@ def _percentage_split_expr(
     the engine recurses with doubled input; we don't.
     """
     d = ctx.dialect
-    seg_lit = string_literal(seg_key)
+    seg_lit = bind_or_inline(ctx.binder, seg_key)
     hash_subject = f"{seg_lit} || ',' || ({ctx_value_sql})"
     h = d.md5_hex(hash_subject)
     s1 = d.parse_hex_chunk(h, 1)
@@ -289,18 +295,19 @@ def _comparison(
     if value is None:
         return "FALSE"
     d = ctx.dialect
-    lit = string_literal(str(value))
     str_expr = expr if is_jsonpath else d.cast_string(expr)
+    # Bind the operand lazily
     if op == "EQUAL":
-        return f"{str_expr} = {lit}"
+        return f"{str_expr} = {bind_or_inline(ctx.binder, str(value))}"
     if op == "NOT_EQUAL":
-        return f"{str_expr} <> {lit}"
+        return f"{str_expr} <> {bind_or_inline(ctx.binder, str(value))}"
     if op == "IN":
-        items = "','".join(escape_string(v.strip()) for v in str(value).split(","))
-        return f"{str_expr} IN ('{items}')"
+        items = ",".join(bind_or_inline(ctx.binder, v.strip()) for v in str(value).split(","))
+        return f"{str_expr} IN ({items})"
     if op == "CONTAINS":
-        return d.position(lit, str_expr)
+        return d.position(bind_or_inline(ctx.binder, str(value)), str_expr)
     if op == "NOT_CONTAINS":
+        lit = bind_or_inline(ctx.binder, str(value))
         return f"({expr} IS NOT NULL AND NOT ({d.position(lit, str_expr)}))"
     if op in {"GREATER_THAN", "LESS_THAN", "GREATER_THAN_INCLUSIVE", "LESS_THAN_INCLUSIVE"}:
         numeric_lit = numeric_literal(value)
@@ -327,7 +334,7 @@ def _comparison(
         pattern = str(value)
         if not d.regex_supports(pattern):
             return None
-        return f"({expr} IS NOT NULL AND {d.regexp_anchored_match(str_expr, pattern)})"
+        return f"({expr} IS NOT NULL AND {d.regexp_anchored_match(str_expr, pattern, ctx.binder)})"
     raise AssertionError(  # pragma: no cover - all TRANSLATABLE_OPERATORS handled above
         f"unhandled translatable operator in _comparison: {op}"
     )
@@ -369,7 +376,7 @@ def _translate_trait_op(
     # content, which is what the fall-through handlers already do.
     if isinstance(val, str) and val.endswith(":semver") and op in _SEMVER_OPS:
         bare = val[:-7]
-        bare_lit = string_literal(bare)
+        bare_lit = bind_or_inline(ctx.binder, bare)
         col_str = ctx.dialect.cast_string(path)
         return (
             f"({path} IS NOT NULL AND "
@@ -382,7 +389,13 @@ def _translate_trait_op(
     # casts, and short-circuit pitfalls are all engine-specific.
     if op in {"EQUAL", "NOT_EQUAL"} and val is not None:
         negate = op == "NOT_EQUAL"
-        eq_pred = ctx.dialect.trait_eq(ctx.identities_alias, trait_key, val, negate=negate)
+        eq_pred = ctx.dialect.trait_eq(
+            ctx.identities_alias,
+            trait_key,
+            val,
+            negate=negate,
+            binder=ctx.binder,
+        )
         return f"({path} IS NOT NULL AND {eq_pred})"
     if op == "IN":
         items = _engine_in_values(val)
@@ -390,7 +403,12 @@ def _translate_trait_op(
             # Bad IN value — neither a string nor a list. Engine returns
             # False.
             return "FALSE"
-        in_pred = ctx.dialect.trait_in(ctx.identities_alias, trait_key, items)
+        in_pred = ctx.dialect.trait_in(
+            ctx.identities_alias,
+            trait_key,
+            items,
+            binder=ctx.binder,
+        )
         return f"({path} IS NOT NULL AND {in_pred})"
 
     return _comparison(ctx, op, path, val, is_jsonpath=False)

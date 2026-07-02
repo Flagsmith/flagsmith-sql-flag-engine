@@ -21,6 +21,21 @@ on the `Dialect` protocol instead.
 """
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from flagsmith_sql_flag_engine.binder import Binder
+
+
+def bind_or_inline(binder: "Binder | None", value: str) -> str:
+    """Return a bound-parameter placeholder for `value` when a `binder` is
+    active, else a single-quoted SQL string literal.
+
+    The single seam that lets a value-bearing literal either be inlined
+    (the default) or promoted to a query parameter, chosen per call site
+    by whether the caller threaded a `Binder` onto the context.
+    """
+    return binder.add(value) if binder is not None else string_literal(value)
 
 
 def escape_string(value: str) -> str:

@@ -3,6 +3,8 @@ regex, padded-version comparison, type-aware trait predicates, regex flavour."""
 
 from typing import Protocol
 
+from flagsmith_sql_flag_engine.binder import Binder
+
 
 class Dialect(Protocol):
     """Per-dialect SQL fragments.
@@ -10,6 +12,10 @@ class Dialect(Protocol):
     Methods return SQL string fragments. Inputs are already-formatted SQL
     strings (column refs, string literals); the dialect only chooses the
     right syntax for the operation.
+
+    Methods that embed a segment- or context-derived value take an
+    optional `binder`: when provided, the value is emitted as a bound
+    query parameter rather than an inline literal.
     """
 
     name: str  # human-readable, used in test ids and error messages
@@ -35,7 +41,14 @@ class Dialect(Protocol):
         """
         ...
 
-    def trait_eq(self, alias: str, trait_key: str, value: object, negate: bool) -> str:
+    def trait_eq(
+        self,
+        alias: str,
+        trait_key: str,
+        value: object,
+        negate: bool,
+        binder: Binder | None = None,
+    ) -> str:
         """Type-aware EQUAL / NOT_EQUAL predicate on a trait, mirroring
         `flag_engine`'s per-type coercion: the segment value is cast to
         the trait's runtime type before compare, and a cast failure
@@ -45,7 +58,13 @@ class Dialect(Protocol):
         """
         ...
 
-    def trait_in(self, alias: str, trait_key: str, items: list[str]) -> str:
+    def trait_in(
+        self,
+        alias: str,
+        trait_key: str,
+        items: list[str],
+        binder: Binder | None = None,
+    ) -> str:
         """Type-aware IN predicate on a trait, mirroring engine semantics:
         string trait does direct lookup; integer trait stringifies and
         looks up; other trait types never match. `items` is the parsed
@@ -77,14 +96,19 @@ class Dialect(Protocol):
         to `flag_engine`."""
         ...
 
-    def regexp_anchored_match(self, value_expr: str, pattern: str) -> str:
+    def regexp_anchored_match(
+        self,
+        value_expr: str,
+        pattern: str,
+        binder: Binder | None = None,
+    ) -> str:
         """Boolean: equivalent to Python `re.match(pattern, value)` —
         anchored at position 0, may be a prefix of the value, not a
         full-match.
 
-        `pattern` is the raw Python regex string; the dialect handles
-        its own escaping into a SQL literal, since regex flavours
-        differ in how backslashes are treated."""
+        `pattern` is the raw Python regex string. With no `binder`, the
+        dialect handles its own escaping into a SQL literal, since regex
+        flavours differ in how backslashes are treated."""
         ...
 
     def regexp_nth_digit_run(self, value_expr: str, n: int) -> str:
