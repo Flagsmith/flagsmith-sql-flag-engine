@@ -76,7 +76,8 @@ typical Flagsmith trait vocabularies; we should monitor.
 ClickHouse Cloud as of 25.12 (no longer experimental on OSS 25.x).
 Callers should apply this setting at session creation."""
 
-from flagsmith_sql_flag_engine.utils import re2_safe, string_literal
+from flagsmith_sql_flag_engine.binder import Binder
+from flagsmith_sql_flag_engine.utils import bind_or_inline, re2_safe
 
 SCHEMA_DDL = """\
 CREATE TABLE IF NOT EXISTS IDENTITIES (
@@ -154,10 +155,17 @@ class ClickHouseDialect:
         sub = self._sub(alias, trait_key)
         return f"if({sub} IS NULL, NULL, toString({sub}))"
 
-    def trait_eq(self, alias: str, trait_key: str, value: object, negate: bool) -> str:
+    def trait_eq(
+        self,
+        alias: str,
+        trait_key: str,
+        value: object,
+        negate: bool,
+        binder: Binder | None = None,
+    ) -> str:
         sub = self._sub(alias, trait_key)
         str_value = str(value)
-        str_lit = string_literal(str_value)
+        str_lit = bind_or_inline(binder, str_value)
         # Engine bool cast: `v not in ("False", "false")`. A JSON true matches
         # every segment value except literal "False" / "false"; those two coerce
         # to False and match a JSON false.
@@ -223,7 +231,13 @@ class ClickHouseDialect:
             f"(({str_sub} IS NOT NULL AND {str_sub} <> {str_lit}) OR {bool_branch} OR {num_branch})"
         )
 
-    def trait_in(self, alias: str, trait_key: str, items: list[str]) -> str:
+    def trait_in(
+        self,
+        alias: str,
+        trait_key: str,
+        items: list[str],
+        binder: Binder | None = None,
+    ) -> str:
         # `toString(<sub>)` returns the canonical string form for any JSON
         # value type in a single subcolumn read. Engine semantics only
         # match String and integer trait types — bool / float / array
@@ -235,7 +249,7 @@ class ClickHouseDialect:
         bool_sub = f"{sub}.:Bool"
         float_sub = f"{sub}.:Float64"
         str_path = f"toString({sub})"
-        item_lits = ",".join(string_literal(v) for v in items)
+        item_lits = ",".join(bind_or_inline(binder, v) for v in items)
         return f"({bool_sub} IS NULL AND {float_sub} IS NULL AND {str_path} IN ({item_lits}))"
 
     # ----- string operations -----
@@ -267,13 +281,21 @@ class ClickHouseDialect:
         doubled = pattern.replace("\\", "\\\\").replace("'", "''")
         return f"'{doubled}'"
 
-    def regexp_anchored_match(self, value_expr: str, pattern: str) -> str:
+    def regexp_anchored_match(
+        self, value_expr: str, pattern: str, binder: Binder | None = None
+    ) -> str:
         # `match` is RE2 but unanchored — equivalent to `re.search`. Prepend
         # `^` to get `re.match` semantics (start-anchored, prefix-allowed).
         # Wrapping in `(...)` keeps the user's top-level alternation from
         # binding tighter than the anchor.
         anchored = "^(" + pattern + ")"
-        return f"match({_non_null(value_expr)}, {self._regex_literal(anchored)})"
+        # Bind the raw pattern when a binder is active: the driver escapes
+        # it, and — crucially — no `%` from a character class like
+        # `[a-z%]` lands in the query text to trip a `%`-substituting
+        # driver. Inline, `_regex_literal` doubles backslashes so RE2 sees
+        # the pattern the segment author wrote.
+        pattern_lit = binder.add(anchored) if binder is not None else self._regex_literal(anchored)
+        return f"match({_non_null(value_expr)}, {pattern_lit})"
 
     def regexp_nth_digit_run(self, value_expr: str, n: int) -> str:
         # `extractAll` returns the matches array; subscript is 1-indexed

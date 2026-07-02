@@ -50,6 +50,36 @@ translator can't handle — typically a REGEX pattern the active dialect's
 regex flavour can't compile. Callers should fall back to
 `flag_engine.is_context_in_segment` for those segments.
 
+## Bound parameters
+
+By default the translator inlines each segment value as an escaped SQL string literal. Pass a `Binder` on the `TranslateContext` to bind value-bearing literals as query parameters instead. 
+
+```python
+from flagsmith_sql_flag_engine import (
+    Binder,
+    PyformatParamStyle,
+    TranslateContext,
+    translate_segment,
+)
+from flagsmith_sql_flag_engine.dialects import ClickHouseDialect
+
+binder = Binder(PyformatParamStyle())
+ctx = TranslateContext(
+    evaluation_context=eval_context,
+    dialect=ClickHouseDialect(),
+    binder=binder,
+)
+where_expr = translate_segment(segment, ctx)
+```
+
+Hand both to the driver:
+
+```python
+   cursor.execute(f"... WHERE ({where_expr})", binder.params)
+```
+
+Currently, `%`-prefixed style `PyformatParamStyle` and ClickHouse-specific `ClickHouseServerParamStyle` are supported.
+
 ## Schema
 
 Each dialect publishes the table layout it expects via a `schema_ddl`
