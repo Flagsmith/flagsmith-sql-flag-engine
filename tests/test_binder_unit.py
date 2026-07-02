@@ -242,6 +242,8 @@ def test_translate_segment__regex_with_percent__binder_survives_pyformat_substit
     # Given
     binder = Binder(PyformatParamStyle())
     seg = make_segment("REGEX", "email", r"[a-z%]+@example\.com")
+
+    # When
     param_sql = translate_segment(seg, make_ctx(binder))
     assert param_sql is not None
 
