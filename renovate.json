@@ -25,6 +25,7 @@
     {
       "description": "Aggressive bumps for the engine-test-data submodule.",
       "matchManagers": ["git-submodules"],
+      "versioning": "semver-coerced",
       "enabled": true
     }
   ]
