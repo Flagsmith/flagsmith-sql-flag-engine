@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.1](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.2.0...v0.2.1) (2026-07-22)
+
+
+### CI
+
+* track engine-test-data semver tags via Renovate ([#22](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/22)) ([dab0ce0](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/dab0ce0dfa3766ecc47ae8e460ad4cff8e0aa4ea))
+
+
+### Dependency Updates
+
+* update dependency engine-test-data to v3.10.0 ([#24](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/24)) ([94a0113](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/94a01135072a2be69248f0bc1670711b4fd319e8))
+
 ## [0.2.0](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.3...v0.2.0) (2026-07-02)
 
 
