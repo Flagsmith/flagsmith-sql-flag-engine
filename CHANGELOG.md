@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.1](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.2.0...v0.2.1) (2026-11-06)
+
+
+### CI
+
+* track engine-test-data semver tags via Renovate ([#22](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/22)) ([dab0ce0](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/dab0ce0dfa3766ecc47ae8e460ad4cff8e0aa4ea))
+
+
+### Dependency Updates
+
+* bump certifi and uv to distrust compromised eMudhra CAs ([#27](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/27)) ([40a8fcc](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/40a8fcc40fe63bc561de20dc66677da76701d31f))
+* update dependency engine-test-data to v3.10.0 ([#24](https://github.com/Flagsmith/flagsmith-sql-flag-engine/issues/24)) ([94a0113](https://github.com/Flagsmith/flagsmith-sql-flag-engine/commit/94a01135072a2be69248f0bc1670711b4fd319e8))
+
 ## [0.2.0](https://github.com/Flagsmith/flagsmith-sql-flag-engine/compare/v0.1.3...v0.2.0) (2026-07-02)
 
 
